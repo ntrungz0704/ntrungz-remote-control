@@ -1,0 +1,39 @@
+{
+  "name": "fast-ship-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nền Tảng Tích Hợp & So Sánh Giao Hàng Đa Hãng (FAST-SHIP-HUB)",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:seed": "tsx prisma/seed.ts",
+    "test": "vitest run",
+    "test:qa": "tsx test-qa-suite.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.0.0",
+    "autoprefixer": "^10.6.2",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.454.0",
+    "next": "^15.0.3",
+    "postcss": "^8.5.32",
+    "react": "^19.0.0-rc-66855b96-20241106",
+    "react-dom": "^19.0.0-rc-66855b96-20241106",
+    "tailwind-merge": "^2.6.1",
+    "tailwindcss": "^3.4.19",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.8.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "prisma": "^6.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^5.1.0"
+  }
+}

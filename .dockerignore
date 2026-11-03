@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.github
+*.log
+.env
+.env.local
+.env.production
+docs
+tests
+coverage
+README.md

@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  fast-ship-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fast-ship-hub-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://fastship:FastShip2026Secure!@fast-ship-db:5432/fast_ship_hub?schema=public
+      - REDIS_URL=redis://fast-ship-redis:6379
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=fsh_super_secret_jwt_key_2026_production_min32chars
+      - VIETQR_BANK_ID=970422
+      - VIETQR_ACCOUNT_NO=0987654321
+      - VIETQR_ACCOUNT_NAME=CONG TY CO PHAN FAST SHIP HUB
+    depends_on:
+      fast-ship-db:
+        condition: service_healthy
+      fast-ship-redis:
+        condition: service_started
+    networks:
+      - fast-ship-network
+
+  fast-ship-db:
+    image: postgres:16-alpine
+    container_name: fast-ship-hub-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=fastship
+      - POSTGRES_PASSWORD=FastShip2026Secure!
+      - POSTGRES_DB=fast_ship_hub
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastship -d fast_ship_hub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fast-ship-network
+
+  fast-ship-redis:
+    image: redis:7-alpine
+    container_name: fast-ship-hub-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - fast-ship-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  fast-ship-network:
+    driver: bridge
