@@ -1,27 +1,33 @@
-# PROJECT STATUS DASHBOARD — FAST-SHIP-HUB
+# TRẠNG THÁI DỰ ÁN (PROJECT_STATUS.MD)
+## DỰ ÁN: PET SOCIAL NETWORK (MẠNG XÃ HỘI THÚ CƯNG)
 
-> **Nền Tảng Tích Hợp Giao Hàng Đa Đơn Vị (ShopeeFood, Grab, Xanh SM, Ahamove, Be, Sandbox)**  
-> **Người Điều Phối**: `orchestrator` (Tổng Thầu)
-
----
-
-## 1. TỔNG QUAN HIỆN TRẠNG
-- **Dự Án**: `FAST-SHIP-HUB` — Multi-Carrier Delivery Platform
-- **Giai Đoạn**: **STAGE 6: Triển Khai Vận Hành & Xuất Xưởng Hoàn Tất (PRODUCTION-READY & SIGNED OFF)**
-- **Tiến Độ Tổng Thể**: **100% HOÀN TẤT (Hoàn thành trọn bộ 12 Roles / 11 Tasks; 40 Tài Liệu Kỹ Thuật; 141/141 Automated Checks PASS; Next.js 15 Standalone 14 Routes; Multi-Carrier 6 Adapters; Cấp Giấy Chứng Nhận Nghiệm Thu Xuất Xưởng CERT-PROD-20261104-FSH)**
-- **Thợ Vừa Hoàn Thành**: `code-reviewer` (Task REV-001 — Nghiệm thu xuất xưởng), `devops-engineer` (Task OPS-001 — Docker & CI/CD Pipeline)
-- **Trạng Thái Vận Hành**: **SẴN SÀNG TRIỂN KHAI PRODUCTION (100% PRODUCTION READY)**
+> **Cập nhật lúc**: 04/11/2026 09:42 | **Trạng thái**: `IN_PROGRESS (PHASE 1 - 4)`  
+> **Điều phối chính**: `orchestrator` | **Chủ sản phẩm đã duyệt**: `DISCOVERY COMPLETED (100%)`
 
 ---
 
-## 2. BẢNG TIẾN ĐỘ THỜI GIAN THỰC
+## 1. TIẾN ĐỘ TỔNG THỂ CÁC GIAI ĐOẠN
 
-| Giai Đoạn | Người Phụ Trách | Nhiệm Vụ | Trạng Thái |
-| :--- | :--- | :--- | :---: |
-| **Stage 0: Khởi tạo & Kế hoạch** | `orchestrator` | Kế hoạch tổng thể & Khảo sát 8 câu hỏi | **DONE** |
-| **Stage 1: Yêu cầu & Kiến trúc** | `business-analyst`, `system-architect` | PRD, So sánh cước Grab/Shopee/XanhSM, Stack, Kiến trúc Adapter | **DONE** |
-| **Stage 2: Giao diện & CSDL** | `ui-ux-designer`, `database-engineer` | UI So sánh cước, Form tạo đơn, Schema CSDL & Seed | **DONE** |
-| **Stage 3: Backend & Adapter API**| `backend-engineer`, `security-reviewer` | Adapter Grab/Shopee/XanhSM/Ahamove/Be/Mock, Quoting, Ví, Webhooks | **DONE** |
-| **Stage 4: Frontend & Tích hợp** | `frontend-engineer` | Giao diện Next.js 15, Bảng cước động, Map tracking SSE, 6 Màn hình | **DONE** |
-| **Stage 5: Kiểm thử & Đánh giá** | `qa-engineer`, `security`, `perf-seo` | Test đặt đơn E2E (39/39), Kiểm toán an ninh (43/43), Đo lường CWV (LCP 0.82s) | **DONE** |
-| **Stage 6: Triển khai vận hành** | `code-reviewer`, `devops-engineer` | Thanh tra mã nguồn Zero-Trust (docs/39-40), Đóng gói Docker, CI/CD Actions | **DONE** |
+- [x] **Giai đoạn 0: Discovery & Thẩm định Nghiệp vụ**: `DONE (100%)`  
+  *Đã xuất bản 8 tài liệu chuẩn: PRD, User Stories, Business Rules, AC, MVP Scope, Tech Stack, Baseline, Final Report.*
+- [x] **Giai đoạn 1: Kiến trúc Hệ thống & Thiết kế Giao diện**: `IN_PROGRESS`  
+  *System Architect thiết kế API contracts; UI/UX Designer hoàn thiện bảng mã màu đáng yêu và tokens.*
+- [ ] **Giai đoạn 2: Cơ sở dữ liệu & Seed Data**: `READY`  
+  *Database Engineer thiết kế Prisma Schema 3NF, mô hình User, Pet, Post, PostPetTag, Paw, Comment, Follow, Report.*
+- [ ] **Giai đoạn 3: Backend Services & API Endpoints**: `BACKLOG`  
+  *Backend Engineer lập trình các dịch vụ xác thực, đăng bài, feed, toggle paw, bình luận và phân quyền.*
+- [ ] **Giai đoạn 4: Frontend Web App Next.js 15**: `BACKLOG`  
+  *Frontend Engineer xây dựng giao diện lướt Feed, Pet Cards, Modal tải bài, Responsive Mobile/Desktop.*
+- [ ] **Giai đoạn 5: Đảm bảo Chất lượng, Bảo mật & Hiệu năng**: `BACKLOG`  
+  *QA Engineer chạy test tự động 100% kịch bản AC; Security Reviewer kiểm toán IDOR và Magic Bytes.*
+- [ ] **Giai đoạn 6: Nghiệm thu & Xuất xưởng**: `BACKLOG`  
+  *Code Reviewer thanh tra Git diff, cấp chứng chỉ nghiệm thu.*
+
+---
+
+## 2. CHỈ SỐ MỤC TIÊU MVP
+- **Tốc độ phản hồi API**: < 200ms
+- **First Contentful Paint (FCP)**: < 1.2s
+- **Dung lượng ảnh trung bình**: 200–500KB (WebP)
+- **Tỷ lệ Test Pass**: 100%
+- **Chi phí vận hành**: 0 VNĐ / tháng ban đầu

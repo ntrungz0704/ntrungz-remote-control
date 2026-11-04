@@ -1,258 +1,393 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import {
-  Zap,
-  Search,
-  TrendingDown,
-  ShieldCheck,
-  Leaf,
-  Clock,
-  ArrowRight,
-  Package,
-  Layers,
-  MapPin,
-  CheckCircle2,
-  ExternalLink,
-} from 'lucide-react';
-import { RouteInputForm } from '@/components/features/RouteInputForm';
-import type { CarrierQuoteRequest } from '@/types/carrier.types';
-import { formatVND } from '@/lib/formatters';
+import { Navbar } from '@/components/Navbar';
+import { PostCard } from '@/components/PostCard';
+import { CreatePostModal } from '@/components/CreatePostModal';
+import { GuestModal } from '@/components/GuestModal';
+import { PetModal } from '@/components/PetModal';
+import { ReportModal } from '@/components/ReportModal';
+import { Sparkles, TrendingUp, Heart, ShieldCheck, Plus } from 'lucide-react';
+import type { PostDetail, User, Pet, PetSpecies } from '@/types/pet-social.types';
 
 export default function HomePage() {
-  const router = useRouter();
-  const [trackingInput, setTrackingInput] = useState('FSH-20261103-8899');
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [userPets, setUserPets] = useState<Pet[]>([]);
+  const [posts, setPosts] = useState<PostDetail[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedSpecies, setSelectedSpecies] = useState<'ALL' | PetSpecies>('ALL');
+  const [searchQuery, setSearchQuery] = useState('');
 
-  const handleTrackSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!trackingInput.trim()) return;
-    router.push(`/track/${encodeURIComponent(trackingInput.trim())}`);
+  // Modals
+  const [isCreatePostOpen, setIsCreatePostOpen] = useState(false);
+  const [isLoginOpen, setIsLoginOpen] = useState(false);
+  const [isPetModalOpen, setIsPetModalOpen] = useState(false);
+  const [reportingPostId, setReportingPostId] = useState<string | null>(null);
+
+  // Check auth session
+  const checkAuth = async () => {
+    try {
+      const res = await fetch('/api/v1/auth/me');
+      const data = await res.json();
+      if (data.authenticated && data.user) {
+        setCurrentUser(data.user);
+        setUserPets(data.pets || []);
+      } else {
+        setCurrentUser(null);
+        setUserPets([]);
+      }
+    } catch {
+      setCurrentUser(null);
+    }
   };
 
-  const handleQuickQuote = (req: CarrierQuoteRequest) => {
-    // Lưu vào sessionStorage để /quote tự động đọc và gọi ngay
-    if (typeof window !== 'undefined') {
-      sessionStorage.setItem('fsh_prefill_quote', JSON.stringify(req));
+  // Fetch chronological feed
+  const fetchFeed = async () => {
+    setLoading(true);
+    try {
+      let url = '/api/v1/feed?limit=20';
+      if (selectedSpecies !== 'ALL') {
+        url += `&species=${selectedSpecies}`;
+      }
+      if (searchQuery.trim()) {
+        url += `&breed=${encodeURIComponent(searchQuery.trim())}`;
+      }
+
+      const headers: Record<string, string> = {};
+      if (currentUser) {
+        headers['x-user-id'] = currentUser.id;
+      }
+
+      const res = await fetch(url, { headers });
+      const data = await res.json();
+      if (data.success) {
+        setPosts(data.posts || []);
+      }
+    } catch (err) {
+      console.error('Lỗi nạp feed', err);
+    } finally {
+      setLoading(false);
     }
-    router.push('/quote');
+  };
+
+  useEffect(() => {
+    checkAuth();
+  }, []);
+
+  useEffect(() => {
+    fetchFeed();
+  }, [selectedSpecies, searchQuery, currentUser]);
+
+  const handlePawToggle = async (postId: string) => {
+    if (!currentUser) {
+      setIsLoginOpen(true);
+      return;
+    }
+    await fetch(`/api/v1/posts/${postId}/paw`, {
+      method: 'POST',
+      headers: {
+        'x-user-id': currentUser.id,
+      },
+    });
+  };
+
+  const handleHidePost = async (postId: string) => {
+    if (!currentUser) return;
+    const res = await fetch(`/api/v1/posts/${postId}/hide`, {
+      method: 'POST',
+      headers: { 'x-user-id': currentUser.id },
+    });
+    const data = await res.json();
+    if (data.success) {
+      setPosts((prev) => prev.filter((p) => p.id !== postId));
+    }
+  };
+
+  const handleDeletePost = async (postId: string) => {
+    if (!currentUser) return;
+    if (!confirm('Bạn có chắc chắn muốn xóa bài viết này không?')) return;
+    const res = await fetch(`/api/v1/posts/${postId}`, {
+      method: 'DELETE',
+      headers: { 'x-user-id': currentUser.id },
+    });
+    const data = await res.json();
+    if (data.success) {
+      setPosts((prev) => prev.filter((p) => p.id !== postId));
+    }
+  };
+
+  const handleLogout = () => {
+    // Clear cookies / session
+    document.cookie = 'auth_token=; Max-Age=0; path=/;';
+    setCurrentUser(null);
+    setUserPets([]);
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-slate-50">
-      {/* 1. Hero Section */}
-      <section className="relative overflow-hidden bg-gradient-to-b from-blue-950 via-slate-900 to-slate-900 text-white pt-14 pb-20 sm:pt-20 sm:pb-28">
-        {/* Decorative Grid Effect */}
-        <div
-          className="absolute inset-0 opacity-10 pointer-events-none"
-          style={{
-            backgroundImage:
-              'radial-gradient(circle at 50% 50%, #3B82F6 1px, transparent 1px)',
-            backgroundSize: '32px 32px',
-          }}
-        />
+    <div className="min-h-screen flex flex-col bg-[#fffbf7]">
+      {/* Navbar */}
+      <Navbar
+        currentUser={currentUser}
+        pets={userPets}
+        onOpenCreatePost={() => (currentUser ? setIsCreatePostOpen(true) : setIsLoginOpen(true))}
+        onOpenLoginModal={() => setIsLoginOpen(true)}
+        onLogout={handleLogout}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+      />
 
-        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
-            {/* Col Left: Headline & Quick Tracking */}
-            <div className="lg:col-span-7 space-y-6 text-center lg:text-left">
-              {/* Badge Pillar */}
-              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-blue-500/10 border border-blue-400/30 text-blue-300 text-xs font-semibold backdrop-blur-md">
-                <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />
-                <span>Nền tảng so sánh cước giao hàng đầu tiên tại Việt Nam</span>
+      {/* Main Body */}
+      <main className="flex-1 max-w-5xl mx-auto px-4 py-6 w-full grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Left Column: Feed (Span 2) */}
+        <div className="lg:col-span-2 space-y-4">
+          {/* Hero Banner for Guests */}
+          {!currentUser && (
+            <div className="p-5 rounded-3xl bg-gradient-to-r from-rose-500 via-orange-400 to-amber-300 text-white shadow-lg shadow-rose-200/50 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="space-y-1 text-center sm:text-left">
+                <span className="text-2xl inline-block animate-bounce">🐶🐱✨</span>
+                <h2 className="text-lg font-black tracking-tight">Chào mừng đến với PetSocial!</h2>
+                <p className="text-xs text-rose-50 max-w-md leading-relaxed">
+                  Cộng đồng chia sẻ hình ảnh và video ngắn về thú cưng. Thả Paw 🐾 và cùng ngắm những khoảnh khắc đáng yêu mỗi ngày!
+                </p>
               </div>
+              <button
+                onClick={() => setIsLoginOpen(true)}
+                className="px-5 py-2.5 bg-white text-rose-600 font-extrabold text-xs rounded-full shadow-md hover:bg-orange-50 active:scale-95 transition-all whitespace-nowrap"
+              >
+                Gia Nhập Ngay 🐾
+              </button>
+            </div>
+          )}
 
-              <h1 className="text-3xl sm:text-5xl lg:text-6xl font-black tracking-tight text-white leading-tight">
-                So Sánh Giá Cước{' '}
-                <span className="bg-gradient-to-r from-blue-400 via-sky-300 to-teal-300 bg-clip-text text-transparent">
-                  5 Hãng Vận Chuyển
-                </span>{' '}
-                Chỉ Trong 1.5 Giây
-              </h1>
+          {/* Species Filter Pills */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none">
+            <button
+              onClick={() => setSelectedSpecies('ALL')}
+              className={`px-4 py-2 rounded-full text-xs font-bold transition-all shrink-0 ${
+                selectedSpecies === 'ALL'
+                  ? 'bg-zinc-900 text-white shadow-sm'
+                  : 'bg-white text-zinc-600 border border-orange-100 hover:bg-orange-50'
+              }`}
+            >
+              🐾 Tất cả bài đăng
+            </button>
+            <button
+              onClick={() => setSelectedSpecies('DOG')}
+              className={`px-4 py-2 rounded-full text-xs font-bold transition-all shrink-0 ${
+                selectedSpecies === 'DOG'
+                  ? 'bg-orange-500 text-white shadow-sm'
+                  : 'bg-white text-zinc-600 border border-orange-100 hover:bg-orange-50'
+              }`}
+            >
+              🐶 Chó cưng
+            </button>
+            <button
+              onClick={() => setSelectedSpecies('CAT')}
+              className={`px-4 py-2 rounded-full text-xs font-bold transition-all shrink-0 ${
+                selectedSpecies === 'CAT'
+                  ? 'bg-rose-500 text-white shadow-sm'
+                  : 'bg-white text-zinc-600 border border-orange-100 hover:bg-orange-50'
+              }`}
+            >
+              🐱 Mèo yêu
+            </button>
+            <button
+              onClick={() => setSelectedSpecies('OTHER')}
+              className={`px-4 py-2 rounded-full text-xs font-bold transition-all shrink-0 ${
+                selectedSpecies === 'OTHER'
+                  ? 'bg-emerald-500 text-white shadow-sm'
+                  : 'bg-white text-zinc-600 border border-orange-100 hover:bg-orange-50'
+              }`}
+            >
+              🐹 Thú nhỏ khác
+            </button>
+          </div>
 
-              <p className="text-sm sm:text-base text-slate-300 max-w-2xl leading-relaxed mx-auto lg:mx-0">
-                Kết nối trực tiếp API với <strong>GrabExpress, ShopeeFood, Xanh SM, Ahamove, Be</strong>.
-                Tự động tìm kiếm gói cước <strong>Rẻ nhất</strong>, <strong>Nhanh nhất</strong> và{' '}
-                <strong>Xanh nhất</strong> với bảo vệ ma trận chống trừ tiền kép.
+          {/* Quick Create Box (When logged in) */}
+          {currentUser && (
+            <div className="p-4 bg-white rounded-3xl border border-orange-100/80 shadow-sm flex items-center gap-3">
+              <Link href={`/profile/${currentUser.username}`}>
+                <img
+                  src={currentUser.avatarUrl || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100'}
+                  alt={currentUser.fullName}
+                  className="w-10 h-10 rounded-full object-cover border border-orange-200"
+                />
+              </Link>
+              <button
+                onClick={() => setIsCreatePostOpen(true)}
+                className="flex-1 text-left px-4 py-2.5 bg-orange-50/60 hover:bg-orange-100/60 border border-orange-100 rounded-full text-xs text-zinc-400 font-medium transition-colors"
+              >
+                Hôm nay bé cưng của bạn có gì vui? Đăng bài ngay... 🐾
+              </button>
+            </div>
+          )}
+
+          {/* Feed Stream */}
+          {loading ? (
+            <div className="py-12 text-center space-y-3">
+              <span className="text-3xl inline-block animate-spin">🐾</span>
+              <p className="text-xs text-zinc-400 font-medium">Đang tải bảng tin thú cưng...</p>
+            </div>
+          ) : posts.length === 0 ? (
+            <div className="p-8 text-center bg-white rounded-3xl border border-orange-100 space-y-3">
+              <span className="text-4xl">🐾</span>
+              <h3 className="font-bold text-zinc-700 text-sm">Chưa có bài viết nào ở danh mục này</h3>
+              <p className="text-xs text-zinc-400 max-w-sm mx-auto">
+                Hãy là người đầu tiên chia sẻ khoảnh khắc của bé cưng đến mọi người!
               </p>
+              {currentUser && (
+                <button
+                  onClick={() => setIsCreatePostOpen(true)}
+                  className="px-4 py-2 bg-rose-500 text-white rounded-full text-xs font-bold shadow-md shadow-rose-200 hover:bg-rose-600 transition-all"
+                >
+                  Đăng Bài Ngay
+                </button>
+              )}
+            </div>
+          ) : (
+            posts.map((post) => (
+              <PostCard
+                key={post.id}
+                post={post}
+                currentUser={currentUser}
+                onPawToggle={handlePawToggle}
+                onTriggerGuestModal={() => setIsLoginOpen(true)}
+                onHidePost={handleHidePost}
+                onDeletePost={handleDeletePost}
+                onReportPost={(postId) => setReportingPostId(postId)}
+              />
+            ))
+          )}
+        </div>
 
-              {/* Ô Tra Cứu Đơn Hàng Nhanh (Guest Live Tracking) */}
-              <div className="bg-white/10 backdrop-blur-md p-2 rounded-2xl border border-white/20 shadow-xl max-w-xl mx-auto lg:mx-0">
-                <form onSubmit={handleTrackSubmit} className="flex items-center gap-2">
-                  <div className="relative flex-1">
-                    <Search className="w-4 h-4 text-slate-300 absolute left-3.5 top-3" aria-hidden="true" />
-                    <input
-                      type="text"
-                      placeholder="Nhập mã đơn hàng hoặc token (VD: FSH-20261103-8899)..."
-                      aria-label="Nhập mã đơn hàng hoặc token theo dõi hành trình"
-                      value={trackingInput}
-                      onChange={(e) => setTrackingInput(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 text-xs sm:text-sm bg-transparent text-white placeholder-slate-400 focus:outline-none"
-                    />
-                  </div>
+        {/* Right Column: Widgets / Suggestions (Span 1) */}
+        <aside className="space-y-6 hidden lg:block">
+          {/* User Pet Card summary */}
+          {currentUser && (
+            <div className="p-5 bg-white rounded-3xl border border-orange-100 shadow-sm space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="font-extrabold text-xs uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
+                  <span>🐾 Bé cưng của tôi ({userPets.length})</span>
+                </h3>
+                <button
+                  onClick={() => setIsPetModalOpen(true)}
+                  className="text-xs text-rose-500 font-bold hover:underline flex items-center gap-0.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Thêm</span>
+                </button>
+              </div>
+
+              {userPets.length === 0 ? (
+                <div className="p-3 bg-orange-50/60 rounded-2xl text-center space-y-1.5">
+                  <p className="text-xs text-zinc-500">Bạn chưa thêm hồ sơ bé cưng nào.</p>
                   <button
-                    type="submit"
-                    aria-label="Tra cứu hành trình đơn hàng trực tiếp trên bản đồ"
-                    className="py-2.5 px-4 sm:px-5 rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white font-bold text-xs sm:text-sm shadow-md transition flex items-center gap-1.5 flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                    onClick={() => setIsPetModalOpen(true)}
+                    className="px-3 py-1 bg-orange-500 text-white rounded-full text-[11px] font-bold"
                   >
-                    <span>Tra Cứu Live</span>
-                    <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+                    + Thêm Bé Cưng Ngay
                   </button>
-                </form>
-              </div>
-
-              {/* Highlight Metrics */}
-              <div className="grid grid-cols-3 gap-4 pt-4 border-t border-slate-800 text-center lg:text-left">
-                <div>
-                  <div className="text-xl sm:text-2xl font-black text-white">&lt; 1.5s</div>
-                  <div className="text-[11px] text-slate-400">Tốc độ báo giá 6 hãng</div>
                 </div>
-                <div>
-                  <div className="text-xl sm:text-2xl font-black text-emerald-400">28% - 35%</div>
-                  <div className="text-[11px] text-slate-400">Tiết kiệm cước bình quân</div>
+              ) : (
+                <div className="space-y-2">
+                  {userPets.map((pet) => (
+                    <div
+                      key={pet.id}
+                      className="flex items-center gap-2.5 p-2 rounded-2xl hover:bg-orange-50/60 transition-colors"
+                    >
+                      <img
+                        src={pet.avatarUrl || 'https://images.unsplash.com/photo-1543466835-00a7907e9de1?w=100'}
+                        alt={pet.name}
+                        className="w-9 h-9 rounded-full object-cover border border-orange-200"
+                      />
+                      <div className="flex-1">
+                        <div className="font-bold text-xs text-zinc-800">{pet.name}</div>
+                        <div className="text-[10px] text-zinc-400">
+                          {pet.species === 'DOG' ? '🐶' : pet.species === 'CAT' ? '🐱' : '🐾'}{' '}
+                          {pet.breed}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div>
-                  <div className="text-xl sm:text-2xl font-black text-teal-300">100% EV</div>
-                  <div className="text-[11px] text-slate-400">Xe máy điện Xanh SM</div>
-                </div>
-              </div>
+              )}
             </div>
+          )}
 
-            {/* Col Right: Route Input Form Widget */}
-            <div className="lg:col-span-5">
-              <div className="relative">
-                <div className="absolute -inset-1 bg-gradient-to-r from-blue-600 to-teal-500 rounded-3xl blur-xl opacity-30" />
-                <div className="relative">
-                  <RouteInputForm onSubmit={handleQuickQuote} />
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* 2. Dải Logo Đối Tác Chính Hãng */}
-      <section className="py-6 bg-white border-b border-slate-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
-              Đối tác vận chuyển tích hợp API trực tiếp:
-            </span>
-            <div className="flex items-center gap-6 sm:gap-8 flex-wrap justify-center">
-              <span className="font-extrabold text-slate-800 hover:text-[#00B14F] transition text-sm flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#00B14F]" /> GrabExpress
-              </span>
-              <span className="font-extrabold text-slate-800 hover:text-[#EE4D2D] transition text-sm flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#EE4D2D]" /> ShopeeFood
-              </span>
-              <span className="font-extrabold text-slate-800 hover:text-[#008B8B] transition text-sm flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#008B8B]" /> Xanh SM EV
-              </span>
-              <span className="font-extrabold text-slate-800 hover:text-[#FF5722] transition text-sm flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#FF5722]" /> Ahamove
-              </span>
-              <span className="font-extrabold text-slate-800 hover:text-[#F59E0B] transition text-sm flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#F59E0B]" /> beDelivery
-              </span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* 3. 4 Trụ Cột Đột Phá (Core Value Propositions) */}
-      <section className="py-16 sm:py-24 bg-slate-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-12">
-          <div className="text-center max-w-2xl mx-auto space-y-3">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-blue-600">
-              Tại Sao Chọn FAST-SHIP-HUB?
-            </h2>
-            <h3 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
-              Trải Nghiệm Vận Chuyển Vượt Trội Cho Mọi Đơn Hàng
+          {/* Trending Breeds */}
+          <div className="p-5 bg-white rounded-3xl border border-orange-100 shadow-sm space-y-3">
+            <h3 className="font-extrabold text-xs uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
+              <TrendingUp className="w-3.5 h-3.5 text-rose-500" />
+              <span>Giống thú cưng thịnh hành</span>
             </h3>
-            <p className="text-sm text-slate-600">
-              Không còn cảnh mở cùng lúc 4 ứng dụng di động để xem app nào có mã giảm giá hay shipper gần hơn.
+            <div className="flex flex-wrap gap-1.5">
+              {['Corgi Pembroke', 'Mèo Mướp Ta', 'Poodle Toy', 'Golden Retriever', 'Mèo Anh Lông Ngắn'].map(
+                (b) => (
+                  <button
+                    key={b}
+                    onClick={() => setSearchQuery(b)}
+                    className="px-2.5 py-1 bg-orange-50 hover:bg-rose-50 border border-orange-100 rounded-full text-[11px] font-semibold text-zinc-700 hover:text-rose-600 transition-colors"
+                  >
+                    #{b}
+                  </button>
+                )
+              )}
+            </div>
+          </div>
+
+          {/* Community Guidelines */}
+          <div className="p-4 bg-gradient-to-tr from-amber-50 to-orange-50 rounded-3xl border border-amber-100 text-xs text-amber-900 space-y-1.5">
+            <div className="flex items-center gap-1.5 font-bold">
+              <ShieldCheck className="w-4 h-4 text-emerald-600" />
+              <span>Tiêu chuẩn cộng đồng</span>
+            </div>
+            <p className="text-[11px] text-amber-800 leading-relaxed">
+              Tất cả bài viết có dấu hiệu bạo hành, ngược đãi hoặc buôn bán thú cưng trái phép sẽ bị Admin gỡ bỏ và khóa tài khoản vĩnh viễn.
             </p>
           </div>
+        </aside>
+      </main>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            {/* Card 1 */}
-            <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-xs hover:shadow-md transition space-y-3">
-              <div className="w-12 h-12 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center font-bold">
-                <Zap className="w-6 h-6" />
-              </div>
-              <h4 className="font-bold text-base text-slate-900">Báo Giá Siêu Tốc &lt; 1.5 Giây</h4>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                Động cơ xử lý song song phân tán (Parallel Quoting Engine) kết nối 6 hãng đồng thời với cơ chế
-                ngắt mạch Circuit Breaker chống gián đoạn.
-              </p>
-            </div>
+      {/* Modals */}
+      {currentUser && (
+        <>
+          <CreatePostModal
+            isOpen={isCreatePostOpen}
+            onClose={() => setIsCreatePostOpen(false)}
+            userPets={userPets}
+            onPostCreated={() => {
+              fetchFeed();
+              checkAuth();
+            }}
+            userId={currentUser.id}
+          />
+          <PetModal
+            isOpen={isPetModalOpen}
+            onClose={() => setIsPetModalOpen(false)}
+            onPetCreated={() => checkAuth()}
+            userId={currentUser.id}
+          />
+        </>
+      )}
 
-            {/* Card 2 */}
-            <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-xs hover:shadow-md transition space-y-3">
-              <div className="w-12 h-12 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
-                <TrendingDown className="w-6 h-6" />
-              </div>
-              <h4 className="font-bold text-base text-slate-900">4 Smart Badges Thông Minh</h4>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                Tự động định vị và dán nhãn 🏆 <strong>Rẻ nhất</strong>, ⚡ <strong>Nhanh nhất</strong>, 🌿{' '}
-                <strong>Xanh nhất</strong>, giúp bạn ra quyết định trong 0.3 giây.
-              </p>
-            </div>
+      <GuestModal
+        isOpen={isLoginOpen}
+        onClose={() => setIsLoginOpen(false)}
+        onLoginSuccess={(user) => {
+          setCurrentUser(user);
+          checkAuth();
+        }}
+      />
 
-            {/* Card 3 */}
-            <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-xs hover:shadow-md transition space-y-3">
-              <div className="w-12 h-12 rounded-xl bg-teal-100 text-teal-700 flex items-center justify-center font-bold">
-                <Leaf className="w-6 h-6" />
-              </div>
-              <h4 className="font-bold text-base text-slate-900">Giao Hàng Xanh Với VinFast EV</h4>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                Ưu tiên kết nối đội ngũ tài xế Xanh SM xe máy điện VinFast Feliz / Klara, tính toán minh bạch chỉ
-                số giảm phát thải CO2 cho mỗi chuyến.
-              </p>
-            </div>
-
-            {/* Card 4 */}
-            <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-xs hover:shadow-md transition space-y-3">
-              <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
-                <Clock className="w-6 h-6" />
-              </div>
-              <h4 className="font-bold text-base text-slate-900">Live Tracking SSE Thời Gian Thực</h4>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                Bản đồ lộ trình tương tác cập nhật vị trí shipper mỗi 3 giây qua luồng Server-Sent Events không
-                cần tải lại trang.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* 4. Call-to-action Section */}
-      <section className="py-14 bg-gradient-to-r from-blue-900 via-indigo-900 to-blue-950 text-white">
-        <div className="max-w-5xl mx-auto px-4 text-center space-y-5">
-          <h2 className="text-2xl sm:text-4xl font-extrabold tracking-tight">
-            Sẵn Sàng Tối Ưu Hóa Chi Phí Vận Chuyển?
-          </h2>
-          <p className="text-sm sm:text-base text-blue-200 max-w-xl mx-auto">
-            Không cần thủ tục phức tạp. Trải nghiệm ngay bảng so sánh cước thời gian thực hoặc quản trị đơn hàng
-            tập trung với ví trả trước VietQR 24/7.
-          </p>
-          <div className="flex items-center justify-center gap-3 pt-2 flex-wrap">
-            <Link
-              href="/quote"
-              className="px-6 py-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-sm shadow-lg transition active:scale-95"
-            >
-              Vào Bảng So Sánh Cước Ngay
-            </Link>
-            <Link
-              href="/dashboard/orders"
-              className="px-6 py-3 rounded-xl bg-white/10 hover:bg-white/20 text-white font-semibold text-sm border border-white/20 transition"
-            >
-              Xem Bảng Quản Lý Đơn Hàng
-            </Link>
-          </div>
-        </div>
-      </section>
+      {reportingPostId && currentUser && (
+        <ReportModal
+          isOpen={!!reportingPostId}
+          onClose={() => setReportingPostId(null)}
+          postId={reportingPostId}
+          userId={currentUser.id}
+        />
+      )}
     </div>
   );
 }

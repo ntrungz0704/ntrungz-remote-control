@@ -1,7 +1,7 @@
 // ============================================================================
-// FAST-SHIP-HUB — PRISMA ORM SCHEMA
+// PET SOCIAL NETWORK — PRISMA ORM SCHEMA
 // Database Engine: PostgreSQL 16.x
-// Architecture: Monolithic First - Modular Domain Design
+// Architecture: Clean Architecture / Modular Domain Design
 // ============================================================================
 
 datasource db {
@@ -15,12 +15,11 @@ generator client {
 }
 
 // ============================================================================
-// 1. SYSTEM ENUMS
+// 1. ENUMS
 // ============================================================================
 
 enum UserRole {
-  GUEST
-  MERCHANT
+  USER
   ADMIN
 
   @@map("user_role")
@@ -28,407 +27,222 @@ enum UserRole {
 
 enum UserStatus {
   ACTIVE
-  SUSPENDED
-  DELETED
+  BANNED
 
   @@map("user_status")
 }
 
-enum OrderStatus {
-  DRAFT
-  QUOTED
-  BOOKED
-  PICKING
-  DELIVERING
-  DELIVERED
-  RETURNING
-  RETURNED
-  FAILED_DISPATCH
-  CANCELLED
+enum PetSpecies {
+  DOG
+  CAT
+  OTHER
 
-  @@map("order_status")
+  @@map("pet_species")
 }
 
-enum CarrierCode {
-  GRAB
-  SHOPEE_FOOD
-  XANH_SM
-  AHAMOVE
-  BE
-  SANDBOX_MOCK
+enum PetGender {
+  MALE
+  FEMALE
+  UNKNOWN
 
-  @@map("carrier_code")
+  @@map("pet_gender")
 }
 
-enum ServiceTierCode {
-  BIKE_INSTANT
-  BIKE_SAME_DAY
-  CAR_DELIVERY
-  TRUCK_500KG
+enum MediaType {
+  NONE
+  IMAGE
+  VIDEO
 
-  @@map("service_tier_code")
+  @@map("media_type")
 }
 
-enum PackageType {
-  DOCUMENT
-  FOOD
-  FASHION
-  FRAGILE
-  ELECTRONICS
+enum PostStatus {
+  PUBLIC
+  HIDDEN
+  SOFT_DELETED
 
-  @@map("package_type")
+  @@map("post_status")
 }
 
-enum SmartBadge {
-  CHEAPEST
-  FASTEST
-  GREENEST
-  BEST_VALUE
+enum ReportReason {
+  CRUELTY
+  SPAM
+  OFFENSIVE
+  FRAUD
+  OTHER
 
-  @@map("smart_badge")
+  @@map("report_reason")
 }
 
-enum TransactionType {
-  TOPUP
-  SHIPPING_PAYMENT
-  HOLD_RESERVATION
-  HOLD_RELEASE
-  REFUND
-  COD_CREDIT
-  PLATFORM_FEE
-  ADJUSTMENT
-
-  @@map("transaction_type")
-}
-
-enum TransactionStatus {
+enum ReportStatus {
   PENDING
-  SUCCESS
-  FAILED
+  RESOLVED
+  DISMISSED
 
-  @@map("transaction_status")
-}
-
-enum WebhookProcessingStatus {
-  PENDING
-  PROCESSED
-  FAILED
-  IGNORED
-
-  @@map("webhook_processing_status")
-}
-
-enum PaymentMethod {
-  WALLET
-  VIETQR
-  COD
-
-  @@map("payment_method")
-}
-
-enum VehicleType {
-  GASOLINE_BIKE
-  ELECTRIC_BIKE
-  CAR
-  TRUCK
-
-  @@map("vehicle_type")
+  @@map("report_status")
 }
 
 // ============================================================================
 // 2. CORE DOMAIN MODELS
 // ============================================================================
 
-/// Người dùng hệ thống: Khách vãng lai, Chủ shop online, Quản trị viên
 model User {
-  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  phone        String     @unique @db.VarChar(20)
-  email        String?    @unique @db.VarChar(255)
-  passwordHash String?    @map("password_hash") @db.VarChar(255)
-  fullName     String     @map("full_name") @db.VarChar(150)
-  role         UserRole   @default(MERCHANT)
+  id           String     @id @default(cuid())
+  email        String     @unique
+  username     String     @unique
+  passwordHash String     @map("password_hash")
+  fullName     String     @map("full_name")
+  avatarUrl    String?    @map("avatar_url")
+  bio          String?
+  role         UserRole   @default(USER)
   status       UserStatus @default(ACTIVE)
-  avatarUrl    String?    @map("avatar_url") @db.Text
-  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz()
-  updatedAt    DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
 
-  // Quan hệ
-  wallet Wallet?
-  orders Order[]
+  // Relationships
+  pets        Pet[]
+  posts       Post[]
+  paws        Paw[]
+  comments    Comment[]
+  reports     Report[]   @relation("UserReports")
+  
+  // Follows: User A follows User B
+  following   Follow[]   @relation("UserFollowing")
+  followers   Follow[]   @relation("UserFollowers")
 
-  @@index([role, status], name: "idx_users_role_status")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
   @@map("users")
 }
 
-/// Ví tiền trả trước của người dùng (Prepaid Balance & Hold Control)
-model Wallet {
-  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  userId            String    @unique @map("user_id") @db.Uuid
-  balance           BigInt    @default(0) @db.BigInt
-  holdBalance       BigInt    @default(0) @map("hold_balance") @db.BigInt
-  currency          String    @default("VND") @db.VarChar(5)
-  lastTransactionAt DateTime? @map("last_transaction_at") @db.Timestamptz()
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz()
-  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
+model Pet {
+  id        String     @id @default(cuid())
+  userId    String     @map("user_id")
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  avatarUrl String?    @map("avatar_url")
+  species   PetSpecies
+  breed     String     // e.g. "Corgi", "Mèo Mướp", "Poodle", "Golden"
+  birthDate DateTime?  @map("birth_date")
+  gender    PetGender  @default(UNKNOWN)
+  bio       String?
 
-  // Quan hệ
-  user         User                @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  transactions WalletTransaction[]
+  // Many-to-many relationship with posts via PostPetTag
+  postTags  PostPetTag[]
 
-  @@index([userId], name: "idx_wallets_user_id")
-  @@map("wallets")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([species, breed])
+  @@map("pets")
 }
 
-/// Sổ cái bất biến ghi nhận mọi biến động số dư ví
-model WalletTransaction {
-  id              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  walletId        String            @map("wallet_id") @db.Uuid
-  orderId         String?           @map("order_id") @db.Uuid
-  transactionCode String            @unique @map("transaction_code") @db.VarChar(32)
-  type            TransactionType
-  status          TransactionStatus @default(PENDING)
-  amount          BigInt            @db.BigInt
-  balanceBefore   BigInt            @map("balance_before") @db.BigInt
-  balanceAfter    BigInt            @map("balance_after") @db.BigInt
-  paymentMethod   PaymentMethod     @default(WALLET) @map("payment_method")
-  referenceId     String?           @map("reference_id") @db.VarChar(100)
-  note            String?           @db.Text
-  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz()
+model Post {
+  id           String     @id @default(cuid())
+  userId       String     @map("user_id")
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  content      String     @db.Text
+  mediaType    MediaType  @default(NONE) @map("media_type")
+  mediaUrls    String[]   @map("media_urls") // Array of image/video URLs
+  status       PostStatus @default(PUBLIC)
+  pawCount     Int        @default(0) @map("paw_count")
+  commentCount Int        @default(0) @map("comment_count")
 
-  // Quan hệ
-  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  order  Order? @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  // Relationships
+  petTags   PostPetTag[]
+  paws      Paw[]
+  comments  Comment[]
+  reports   Report[]
 
-  @@index([walletId, createdAt(sort: Desc)], name: "idx_wallet_tx_wallet_created")
-  @@index([orderId], name: "idx_wallet_tx_order_id")
-  @@index([type, status], name: "idx_wallet_tx_type_status")
-  @@map("wallet_transactions")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("posts")
 }
 
-/// Danh mục đối tác vận chuyển tích hợp
-model Carrier {
-  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code          CarrierCode @unique
-  name          String      @db.VarChar(100)
-  logoUrl       String?     @map("logo_url") @db.Text
-  isActive      Boolean     @default(true) @map("is_active")
-  isMock        Boolean     @default(false) @map("is_mock")
-  webhookSecret String?     @map("webhook_secret") @db.Text
-  hotline       String?     @db.VarChar(20)
-  settings      Json        @default("{}") @db.JsonB
-  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz()
-  updatedAt     DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
+model PostPetTag {
+  id        String   @id @default(cuid())
+  postId    String   @map("post_id")
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  petId     String   @map("pet_id")
+  pet       Pet      @relation(fields: [petId], references: [id], onDelete: Cascade)
 
-  // Quan hệ
-  serviceTiers CarrierServiceTier[]
-  orders       Order[]
-  quotes       CarrierQuote[]
-  webhookLogs  WebhookLog[]
+  createdAt DateTime @default(now()) @map("created_at")
 
-  @@map("carriers")
+  @@unique([postId, petId])
+  @@index([petId])
+  @@map("post_pet_tags")
 }
 
-/// Các gói dịch vụ vận chuyển của từng hãng (Giao tức thì, trong ngày, xe tải...)
-model CarrierServiceTier {
-  id                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  carrierId          String          @map("carrier_id") @db.Uuid
-  tierCode           ServiceTierCode @map("tier_code")
-  tierName           String          @map("tier_name") @db.VarChar(100)
-  vehicleType        VehicleType     @default(GASOLINE_BIKE) @map("vehicle_type")
-  maxWeightGrams     Int             @default(30000) @map("max_weight_grams")
-  maxDimensionCm     Int             @default(50) @map("max_dimension_cm")
-  baseFeeVnd         Int             @map("base_fee_vnd")
-  baseDistanceMeters Int             @default(2000) @map("base_distance_meters")
-  pricePerNextKmVnd  Int             @map("price_per_next_km_vnd")
-  isActive           Boolean         @default(true) @map("is_active")
-  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz()
-  updatedAt          DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
+model Paw {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId    String   @map("post_id")
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
 
-  // Quan hệ
-  carrier Carrier        @relation(fields: [carrierId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  orders  Order[]
-  quotes  CarrierQuote[]
+  createdAt DateTime @default(now()) @map("created_at")
 
-  @@unique([carrierId, tierCode], name: "carrierId_tierCode")
-  @@map("carrier_service_tiers")
+  // Guarantee: One Paw per User per Post
+  @@unique([userId, postId])
+  @@index([postId])
+  @@map("paws")
 }
 
-/// Thực thể trung tâm quản lý toàn bộ vòng đời đơn hàng
-model Order {
-  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderCode        String        @unique @map("order_code") @db.VarChar(32)
-  trackingToken    String        @unique @map("tracking_token") @db.VarChar(64)
-  userId           String        @map("user_id") @db.Uuid
-  carrierId        String?       @map("carrier_id") @db.Uuid
-  serviceTierId    String?       @map("service_tier_id") @db.Uuid
-  selectedQuoteId  String?       @map("selected_quote_id") @db.Uuid
-  carrierOrderId   String?       @map("carrier_order_id") @db.VarChar(100)
-  status           OrderStatus   @default(DRAFT)
-  paymentMethod    PaymentMethod @default(WALLET) @map("payment_method")
+model Comment {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId    String   @map("post_id")
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  
+  // 1-Level Nesting: parentId is null for root comments; points to root comment for replies
+  parentId  String?  @map("parent_id")
+  parent    Comment? @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies   Comment[] @relation("CommentReplies")
 
-  // Thông tin điểm lấy hàng (Pickup)
-  pickupSenderName  String  @map("pickup_sender_name") @db.VarChar(150)
-  pickupSenderPhone String  @map("pickup_sender_phone") @db.VarChar(20)
-  pickupAddress     String  @map("pickup_address") @db.Text
-  pickupLatitude    Decimal @map("pickup_latitude") @db.Decimal(10, 7)
-  pickupLongitude   Decimal @map("pickup_longitude") @db.Decimal(10, 7)
-  pickupNote        String? @map("pickup_note") @db.Text
+  content   String   @db.Text
+  isDeleted Boolean  @default(false) @map("is_deleted")
 
-  // Thông tin điểm giao hàng (Dropoff)
-  dropoffReceiverName  String  @map("dropoff_receiver_name") @db.VarChar(150)
-  dropoffReceiverPhone String  @map("dropoff_receiver_phone") @db.VarChar(20)
-  dropoffAddress       String  @map("dropoff_address") @db.Text
-  dropoffLatitude      Decimal @map("dropoff_latitude") @db.Decimal(10, 7)
-  dropoffLongitude     Decimal @map("dropoff_longitude") @db.Decimal(10, 7)
-  dropoffNote          String? @map("dropoff_note") @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  // Thông số đo đạc đường bộ
-  distanceMeters  Int @default(0) @map("distance_meters")
-  durationSeconds Int @default(0) @map("duration_seconds")
-
-  // Cơ cấu cước phí (VNĐ)
-  baseFee        Int @default(0) @map("base_fee")
-  surcharges     Int @default(0)
-  platformFee    Int @default(1000) @map("platform_fee")
-  discountAmount Int @default(0) @map("discount_amount")
-  finalTotalFee  Int @default(0) @map("final_total_fee")
-
-  // Thông tin tài xế thực hiện
-  driverName         String?      @map("driver_name") @db.VarChar(150)
-  driverPhone        String?      @map("driver_phone") @db.VarChar(20)
-  driverLicensePlate String?      @map("driver_license_plate") @db.VarChar(30)
-  driverVehicleType  VehicleType? @map("driver_vehicle_type")
-  driverCurrentLat   Decimal?     @map("driver_current_lat") @db.Decimal(10, 7)
-  driverCurrentLng   Decimal?     @map("driver_current_lng") @db.Decimal(10, 7)
-  driverAssignedAt   DateTime?    @map("driver_assigned_at") @db.Timestamptz()
-
-  // Mốc thời gian thực hiện
-  pickedUpAt         DateTime? @map("picked_up_at") @db.Timestamptz()
-  deliveredAt        DateTime? @map("delivered_at") @db.Timestamptz()
-  cancelledAt        DateTime? @map("cancelled_at") @db.Timestamptz()
-  cancellationReason String?   @map("cancellation_reason") @db.Text
-
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
-  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
-
-  // Quan hệ
-  user          User                @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  carrier       Carrier?            @relation(fields: [carrierId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  serviceTier   CarrierServiceTier? @relation(fields: [serviceTierId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  selectedQuote CarrierQuote?       @relation("OrderSelectedQuote", fields: [selectedQuoteId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-
-  package      Package?
-  quotes       CarrierQuote[]      @relation("OrderCarrierQuotes")
-  statusLogs   OrderStatusLog[]
-  transactions WalletTransaction[]
-  webhookLogs  WebhookLog[]
-
-  @@index([userId, createdAt(sort: Desc)], name: "idx_orders_user_created")
-  @@index([status], name: "idx_orders_status")
-  @@index([carrierId, status], name: "idx_orders_carrier_status")
-  @@index([carrierOrderId], name: "idx_orders_carrier_order_id")
-  @@index([trackingToken], name: "idx_orders_tracking_token")
-  @@index([createdAt(sort: Desc)], name: "idx_orders_created_at_desc")
-  @@map("orders")
+  @@index([postId, createdAt(sort: Asc)])
+  @@index([parentId])
+  @@map("comments")
 }
 
-/// Kiện hàng hóa gắn liền với đơn hàng (Quan hệ 1:1)
-model Package {
-  id                  String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderId             String      @unique @map("order_id") @db.Uuid
-  name                String      @db.VarChar(200)
-  packageType         PackageType @default(FASHION) @map("package_type")
-  weightInGrams       Int         @map("weight_in_grams")
-  lengthCm            Int         @default(20) @map("length_cm")
-  widthCm             Int         @default(15) @map("width_cm")
-  heightCm            Int         @default(10) @map("height_cm")
-  declaredValueVnd    Int         @default(0) @map("declared_value_vnd")
-  codAmountVnd        Int         @default(0) @map("cod_amount_vnd")
-  isFragile           Boolean     @default(false) @map("is_fragile")
-  deliverToDoor       Boolean     @default(false) @map("deliver_to_door")
-  specialInstructions String?     @map("special_instructions") @db.Text
-  createdAt           DateTime    @default(now()) @map("created_at") @db.Timestamptz()
-  updatedAt           DateTime    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz()
+model Follow {
+  id          String   @id @default(cuid())
+  followerId  String   @map("follower_id")
+  follower    User     @relation("UserFollowing", fields: [followerId], references: [id], onDelete: Cascade)
+  followingId String   @map("following_id")
+  following   User     @relation("UserFollowers", fields: [followingId], references: [id], onDelete: Cascade)
 
-  // Quan hệ
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  createdAt   DateTime @default(now()) @map("created_at")
 
-  @@map("packages")
+  // Guarantee: One active follow per pair
+  @@unique([followerId, followingId])
+  @@index([followingId])
+  @@map("follows")
 }
 
-/// Báo giá cước của từng hãng cho phiên tìm kiếm (TTL 300 giây)
-model CarrierQuote {
-  id                      String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderId                 String?     @map("order_id") @db.Uuid
-  carrierId               String      @map("carrier_id") @db.Uuid
-  serviceTierId           String      @map("service_tier_id") @db.Uuid
-  quoteReferenceId        String?     @map("quote_reference_id") @db.VarChar(100)
-  baseFee                 Int         @map("base_fee")
-  surcharges              Int         @default(0)
-  platformFee             Int         @default(1000) @map("platform_fee")
-  discountAmount          Int         @default(0) @map("discount_amount")
-  finalTotalFee           Int         @map("final_total_fee")
-  estimatedPickupMinutes  Int         @default(10) @map("estimated_pickup_minutes")
-  estimatedDeliveryMinutes Int        @default(30) @map("estimated_delivery_minutes")
-  badge                   SmartBadge?
-  isAvailable             Boolean     @default(true) @map("is_available")
-  errorMessage            String?     @map("error_message") @db.Text
-  expiredAt               DateTime    @map("expired_at") @db.Timestamptz()
-  createdAt               DateTime    @default(now()) @map("created_at") @db.Timestamptz()
+model Report {
+  id         String       @id @default(cuid())
+  reporterId String       @map("reporter_id")
+  reporter   User         @relation("UserReports", fields: [reporterId], references: [id], onDelete: Cascade)
+  postId     String       @map("post_id")
+  post       Post         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reason     ReportReason
+  details    String?      @db.Text
+  status     ReportStatus @default(PENDING)
 
-  // Quan hệ
-  order             Order?              @relation("OrderCarrierQuotes", fields: [orderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  carrier           Carrier             @relation(fields: [carrierId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  serviceTier       CarrierServiceTier  @relation(fields: [serviceTierId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  selectedForOrders Order[]             @relation("OrderSelectedQuote")
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime     @updatedAt @map("updated_at")
 
-  @@index([orderId], name: "idx_carrier_quotes_order_id")
-  @@index([carrierId, serviceTierId], name: "idx_carrier_quotes_carrier_tier")
-  @@index([expiredAt], name: "idx_carrier_quotes_expired_at")
-  @@map("carrier_quotes")
-}
-
-/// Nhật ký truy vết (Audit Trail) lịch sử 10 trạng thái của đơn hàng
-model OrderStatusLog {
-  id            String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderId       String       @map("order_id") @db.Uuid
-  oldStatus     OrderStatus? @map("old_status")
-  newStatus     OrderStatus  @map("new_status")
-  changedBy     String       @default("SYSTEM") @map("changed_by") @db.VarChar(100)
-  triggerSource String       @default("USER_ACTION") @map("trigger_source") @db.VarChar(50)
-  reason        String?      @db.Text
-  metadata      Json         @default("{}") @db.JsonB
-  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz()
-
-  // Quan hệ
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-
-  @@index([orderId, createdAt(sort: Asc)], name: "idx_status_logs_order_created")
-  @@map("order_status_logs")
-}
-
-/// Nhật ký các sự kiện Webhook từ đối tác (Idempotency & Auditing)
-model WebhookLog {
-  id               String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  carrierId        String                  @map("carrier_id") @db.Uuid
-  orderId          String?                 @map("order_id") @db.Uuid
-  eventId          String                  @map("event_id") @db.VarChar(128)
-  eventType        String                  @map("event_type") @db.VarChar(100)
-  normalizedStatus OrderStatus?            @map("normalized_status")
-  signature        String?                 @db.VarChar(255)
-  signatureValid   Boolean                 @default(false) @map("signature_valid")
-  status           WebhookProcessingStatus @default(PENDING)
-  rawPayload       Json                    @map("raw_payload") @db.JsonB
-  errorMessage     String?                 @map("error_message") @db.Text
-  processedAt      DateTime?               @map("processed_at") @db.Timestamptz()
-  createdAt        DateTime                @default(now()) @map("created_at") @db.Timestamptz()
-
-  // Quan hệ
-  carrier Carrier @relation(fields: [carrierId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-
-  @@unique([carrierId, eventId], name: "carrierId_eventId")
-  @@index([orderId], name: "idx_webhook_logs_order_id")
-  @@index([carrierId], name: "idx_webhook_logs_carrier_id")
-  @@map("webhook_logs")
+  @@unique([reporterId, postId])
+  @@index([status])
+  @@map("reports")
 }

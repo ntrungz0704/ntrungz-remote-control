@@ -1,18 +1,17 @@
 {
-  "name": "fast-ship-hub",
+  "name": "pet-social-network",
   "version": "1.0.0",
   "private": true,
-  "description": "Nền Tảng Tích Hợp & So Sánh Giao Hàng Đa Hãng (FAST-SHIP-HUB)",
+  "description": "Pet Social Network — Mạng xã hội chia sẻ ảnh và video ngắn cho thú cưng",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts",
     "test": "vitest run",
-    "test:qa": "tsx test-qa-suite.ts"
+    "test:suite": "tsx test-pet-social-suite.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.0.0",
