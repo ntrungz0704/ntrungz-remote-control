@@ -28,6 +28,7 @@ import {
 import type { User, Pet, PostDetail } from '@/types/pet-social.types';
 
 export default function UserProfilePage() {
+  const [mounted, setMounted] = useState(false);
   const params = useParams();
   const router = useRouter();
   const username = params?.username as string;
@@ -90,6 +91,7 @@ export default function UserProfilePage() {
   };
 
   useEffect(() => {
+    setMounted(true);
     checkAuth();
     fetchProfile();
   }, [username]);
@@ -146,6 +148,10 @@ export default function UserProfilePage() {
     if (activeTab === 'VIDEO') return p.mediaType === 'VIDEO';
     return true;
   });
+
+  if (!mounted) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen bg-[#FFF9F5] text-zinc-900 pb-16">

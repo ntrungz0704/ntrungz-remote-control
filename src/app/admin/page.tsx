@@ -18,6 +18,7 @@ import {
 import type { User, Report } from '@/types/pet-social.types';
 
 export default function AdminReportsPage() {
+  const [mounted, setMounted] = useState(false);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
@@ -55,6 +56,7 @@ export default function AdminReportsPage() {
   };
 
   useEffect(() => {
+    setMounted(true);
     checkAuth();
     fetchReports();
   }, []);
@@ -84,6 +86,10 @@ export default function AdminReportsPage() {
   });
 
   const isAdmin = currentUser?.role === 'ADMIN';
+
+  if (!mounted) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen bg-[#FFF9F5] text-zinc-900 pb-16">

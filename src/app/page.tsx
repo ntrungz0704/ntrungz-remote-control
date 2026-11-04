@@ -12,6 +12,7 @@ import { Sparkles, TrendingUp, Heart, ShieldCheck, Plus } from 'lucide-react';
 import type { PostDetail, User, Pet, PetSpecies } from '@/types/pet-social.types';
 
 export default function HomePage() {
+  const [mounted, setMounted] = useState(false);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [userPets, setUserPets] = useState<Pet[]>([]);
   const [posts, setPosts] = useState<PostDetail[]>([]);
@@ -72,6 +73,7 @@ export default function HomePage() {
   };
 
   useEffect(() => {
+    setMounted(true);
     checkAuth();
   }, []);
 
@@ -123,6 +125,10 @@ export default function HomePage() {
     setCurrentUser(null);
     setUserPets([]);
   };
+
+  if (!mounted) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-[#fffbf7]">
