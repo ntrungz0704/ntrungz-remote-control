@@ -1,0 +1,115 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  ADMIN
+  USER
+}
+
+enum DeviceStatus {
+  ONLINE
+  OFFLINE
+  PAIRED
+  UNPAIRED
+  REVOKED
+}
+
+enum PairingStatus {
+  PENDING
+  VERIFIED
+  EXPIRED
+  LOCKED
+  REVOKED
+}
+
+enum DeviceType {
+  WINDOWS_PC
+  ANDROID_PHONE
+  WEB_BROWSER
+}
+
+model User {
+  id              String           @id @default(uuid())
+  email           String           @unique
+  name            String
+  passwordHash    String
+  role            UserRole         @default(USER)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  devices         Device[]
+  pairingSessions PairingSession[]
+  auditLogs       AuditLog[]
+
+  @@map("users")
+}
+
+model Device {
+  id                 String           @id @default(uuid())
+  name               String
+  deviceType         DeviceType       @default(WINDOWS_PC)
+  hardwareIdentifier String           // MachineGuid or TPM Fingerprint
+  publicKey          String           // Ed25519/RSA Public Key for signature validation
+  ownerId            String
+  status             DeviceStatus     @default(UNPAIRED)
+  osInfo             String?
+  ipAddress          String?
+  lastSeenAt         DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  owner              User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  pairingSessions    PairingSession[]
+  auditLogs          AuditLog[]
+
+  @@unique([hardwareIdentifier, ownerId])
+  @@index([ownerId])
+  @@index([status])
+  @@map("devices")
+}
+
+model PairingSession {
+  id           String        @id @default(uuid())
+  deviceId     String
+  userId       String
+  pinHash      String        // Argon2 or Bcrypt hash of 6-digit PIN (Never Plaintext!)
+  salt         String
+  expiresAt    DateTime
+  status       PairingStatus @default(PENDING)
+  attemptCount Int           @default(0)
+  maxAttempts  Int           @default(3)
+  lockedUntil  DateTime?
+  createdAt    DateTime      @default(now())
+
+  device       Device        @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId])
+  @@index([userId])
+  @@index([status])
+  @@map("pairing_sessions")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  deviceId  String?
+  eventType String
+  details   Json
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  device    Device?  @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([deviceId])
+  @@index([eventType])
+  @@map("audit_logs")
+}

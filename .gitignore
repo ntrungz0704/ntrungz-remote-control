@@ -17,3 +17,7 @@ yarn-error.log*
 .env.production.local
 
 Automations/
+ 
+*.png
+telegram_bot/.env
+telegram_bot/device_security.json
