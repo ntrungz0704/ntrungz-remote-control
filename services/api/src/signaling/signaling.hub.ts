@@ -22,7 +22,40 @@ export class SignalingHub {
   constructor(
     private deviceService: DeviceService,
     private sessionService: SessionService
-  ) {}
+  ) {
+    this.deviceService.onDeviceRevoked((deviceId) => {
+      this.disconnectDevice(deviceId, 'Device revoked by owner');
+    });
+  }
+
+  /**
+   * Ngắt kết nối tức thì tất cả WebSocket peers đang gắn với thiết bị bị thu hồi
+   */
+  public disconnectDevice(deviceId: string, reason: string): void {
+    const peersToDisconnect: string[] = [];
+    for (const [peerId, peer] of this.peers.entries()) {
+      if (peer.deviceId === deviceId) {
+        peersToDisconnect.push(peerId);
+      }
+    }
+
+    for (const peerId of peersToDisconnect) {
+      const peer = this.peers.get(peerId);
+      if (peer) {
+        try {
+          peer.send({
+            type: SignalingMessageType.ERROR,
+            senderId: 'SERVER',
+            error: reason,
+            payload: { code: 'DEVICE_REVOKED' }
+          });
+        } catch (_) {}
+      }
+      this.peers.delete(peerId);
+    }
+
+    this.agentMap.delete(deviceId);
+  }
 
   /**
    * Đăng ký một Peer mới vào Hub kèm xác thực Token
@@ -88,6 +121,30 @@ export class SignalingHub {
     const sender = this.peers.get(senderPeerId);
     if (!sender) {
       throw new Error(`Unauthorized peer ${senderPeerId}`);
+    }
+
+    // Strict Peer & Session Isolation Guard
+    if (message.sessionId) {
+      const session = this.sessionService.getSession(message.sessionId);
+      if (!session) {
+        sender.send({
+          type: SignalingMessageType.ERROR,
+          senderId: 'SERVER',
+          error: `Session ${message.sessionId} not found`
+        });
+        return;
+      }
+
+      const agentPeerId = this.agentMap.get(session.deviceId);
+      const isAuthorizedSender = (sender.id === session.clientId || sender.id === agentPeerId);
+      if (!isAuthorizedSender) {
+        sender.send({
+          type: SignalingMessageType.ERROR,
+          senderId: 'SERVER',
+          error: 'Unauthorized: Peer does not belong to this session'
+        });
+        return;
+      }
     }
 
     switch (message.type) {

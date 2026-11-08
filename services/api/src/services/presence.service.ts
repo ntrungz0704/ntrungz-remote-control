@@ -60,6 +60,13 @@ export class PresenceService {
     return presence;
   }
 
+  public setLastSeen(deviceId: string, date: Date): void {
+    const presence = this.presences.get(deviceId);
+    if (presence) {
+      presence.lastSeenAt = date;
+    }
+  }
+
   /**
    * Kiểm tra và cập nhật trạng thái Offline cho các thiết bị quá hạn heartbeat
    */
@@ -119,5 +126,27 @@ export class PresenceService {
       isReachable: isOnline,
       isAvailableForNewSession: isOnline && activeSessions.length < this.MAX_CONCURRENT_SESSIONS_PER_PC
     };
+  }
+
+  public async handleDisconnect(deviceId: string): Promise<void> {
+    const presence = this.presences.get(deviceId);
+    if (presence) {
+      presence.status = DeviceStatus.OFFLINE;
+      presence.isReachable = false;
+      presence.isAvailableForNewSession = false;
+    }
+    await this.deviceService.updateStatus(deviceId, DeviceStatus.OFFLINE);
+  }
+
+  public async listUserDevicesWithPresence(userId: string): Promise<Array<DevicePresence & { name: string; id: string }>> {
+    const devices = await this.deviceService.listDevices(userId);
+    return devices.map(d => {
+      const p = this.getPresence(d.id);
+      return {
+        ...p,
+        id: d.id,
+        name: d.name
+      };
+    });
   }
 }

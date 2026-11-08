@@ -35,8 +35,13 @@ export class DeviceService {
   private devices = new Map<string, Device>();
   private challenges = new Map<string, DeviceChallenge>();
   private tokens = new Map<string, StoredDeviceToken>(); // key: tokenHash
+  private revocationListeners: Array<(deviceId: string) => void> = [];
 
   constructor(private auditService: AuditService) {}
+
+  public onDeviceRevoked(listener: (deviceId: string) => void): void {
+    this.revocationListeners.push(listener);
+  }
 
   public async registerDevice(input: {
     name: string;
@@ -155,6 +160,15 @@ export class DeviceService {
       details: { reason: reason || 'Manual user revocation' }
     });
 
+    // Thông báo cho các hệ thống phụ thuộc (SignalingHub, SessionService) lập tức ngắt kết nối
+    for (const listener of this.revocationListeners) {
+      try {
+        listener(deviceId);
+      } catch (err) {
+        console.error('Error in revocation listener:', err);
+      }
+    }
+
     return device;
   }
 
@@ -243,6 +257,15 @@ export class DeviceService {
       revoked: false,
       createdAt: new Date()
     });
+  }
+
+  /**
+   * Sinh và lưu trữ Device Token mới cho thiết bị
+   */
+  public async issueDeviceToken(deviceId: string, userId: string, validityDays = 30): Promise<{ token: string }> {
+    const rawToken = CryptoUtil.generateDeviceToken();
+    this.storeDeviceToken(rawToken, deviceId, userId, validityDays);
+    return { token: rawToken };
   }
 
   /**

@@ -20,7 +20,11 @@ export class SessionService {
   constructor(
     private deviceService: DeviceService,
     private auditService: AuditService
-  ) {}
+  ) {
+    this.deviceService.onDeviceRevoked((deviceId) => {
+      this.endAllSessionsForDevice(deviceId, 'Device revoked');
+    });
+  }
 
   /**
    * Tạo phiên điều khiển từ xa mới (RemoteSession)
@@ -142,6 +146,15 @@ export class SessionService {
     });
 
     return session;
+  }
+
+  public async endAllSessionsForDevice(deviceId: string, reason?: string): Promise<RemoteSession[]> {
+    const active = this.listActiveSessions(deviceId);
+    const ended: RemoteSession[] = [];
+    for (const session of active) {
+      ended.push(await this.endSession(session.id, { reason: reason || 'Device revoked' }));
+    }
+    return ended;
   }
 
   public getSession(sessionId: string): RemoteSession | undefined {

@@ -8,6 +8,10 @@ export class CryptoUtil {
     return crypto.randomInt(100000, 1000000).toString();
   }
 
+  public static generateDeviceToken(): string {
+    return `dev_tok_${crypto.randomBytes(32).toString('hex')}`;
+  }
+
   /**
    * Sinh chuỗi salt ngẫu nhiên
    */
