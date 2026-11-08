@@ -110,7 +110,17 @@ export class NamedPipeClient {
 
   private respondToChallenge(challenge: string): void {
     const timestamp = Date.now();
-    const signature = IpcFraming.computeHandshakeSignature(this.authToken, challenge, timestamp);
+    const version = '3.0.0-phase3a';
+    const clientType = 'INTERACTIVE_AGENT';
+
+    const signature = IpcFraming.computeHandshakeSignature(this.authToken, {
+      challenge,
+      timestamp,
+      processId: process.pid,
+      windowsSessionId: this.windowsSessionId,
+      clientType,
+      version
+    });
 
     const responseMsg: IpcMessage<IpcHandshakeResponsePayload> = {
       id: crypto.randomUUID(),
@@ -121,8 +131,8 @@ export class NamedPipeClient {
         timestamp,
         processId: process.pid,
         windowsSessionId: this.windowsSessionId,
-        clientType: 'INTERACTIVE_AGENT',
-        version: '3.0.0-phase3a'
+        clientType,
+        version
       }
     };
 

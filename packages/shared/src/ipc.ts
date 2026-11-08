@@ -159,22 +159,83 @@ export class IpcFraming {
   }
 
   /**
-   * Tính toán chữ ký HMAC-SHA256 cho Challenge Handshake
+   * Tính toán chữ ký HMAC-SHA256 cho Challenge Handshake ràng buộc chặt chẽ mọi trường định danh
+   * (challenge, timestamp, processId, windowsSessionId, clientType, version)
    */
-  public static computeHandshakeSignature(token: string, challenge: string, timestamp: number): string {
+  public static computeHandshakeSignature(
+    token: string, 
+    paramsOrChallenge: {
+      challenge: string;
+      timestamp: number;
+      processId?: number;
+      windowsSessionId?: number;
+      clientType?: string;
+      version?: string;
+    } | string,
+    legacyTimestamp?: number,
+    legacyProcessId?: number,
+    legacySessionId?: number,
+    legacyClientType?: string,
+    legacyVersion?: string
+  ): string {
+    let payloadToSign: string;
+    if (typeof paramsOrChallenge === 'string') {
+      const ts = legacyTimestamp ?? 0;
+      const pid = legacyProcessId ?? process.pid;
+      const sid = legacySessionId ?? 1;
+      const cType = legacyClientType ?? 'INTERACTIVE_AGENT';
+      const ver = legacyVersion ?? '3.0.0-phase3a';
+      payloadToSign = `${paramsOrChallenge}:${ts}:${pid}:${sid}:${cType}:${ver}`;
+    } else {
+      const pid = paramsOrChallenge.processId ?? process.pid;
+      const sid = paramsOrChallenge.windowsSessionId ?? 1;
+      const cType = paramsOrChallenge.clientType ?? 'INTERACTIVE_AGENT';
+      const ver = paramsOrChallenge.version ?? '3.0.0-phase3a';
+      payloadToSign = `${paramsOrChallenge.challenge}:${paramsOrChallenge.timestamp}:${pid}:${sid}:${cType}:${ver}`;
+    }
     const hmac = crypto.createHmac('sha256', token);
-    hmac.update(`${challenge}:${timestamp}`);
+    hmac.update(payloadToSign);
     return hmac.digest('hex');
   }
 
   /**
    * Xác thực chữ ký bằng constant-time so sánh an toàn mật mã học
    */
-  public static verifyHandshakeSignature(token: string, challenge: string, timestamp: number, signature: string): boolean {
-    const expected = this.computeHandshakeSignature(token, challenge, timestamp);
+  public static verifyHandshakeSignature(
+    token: string,
+    paramsOrChallenge: {
+      challenge: string;
+      timestamp: number;
+      processId?: number;
+      windowsSessionId?: number;
+      clientType?: string;
+      version?: string;
+    } | string,
+    signatureOrTimestamp: string | number,
+    optionalSignature?: string
+  ): boolean {
+    let signature: string;
+    let expected: string;
+
+    if (typeof paramsOrChallenge === 'string') {
+      const challenge = paramsOrChallenge;
+      const timestamp = signatureOrTimestamp as number;
+      signature = optionalSignature || '';
+      expected = this.computeHandshakeSignature(token, challenge, timestamp);
+    } else {
+      signature = signatureOrTimestamp as string;
+      expected = this.computeHandshakeSignature(token, paramsOrChallenge);
+    }
+
+    // 1. Kiểm tra format chữ ký (phải là 64 ký tự hex hợp lệ)
+    if (!signature || typeof signature !== 'string' || signature.length !== 64 || !/^[0-9a-f]{64}$/i.test(signature)) {
+      return false;
+    }
+
     if (expected.length !== signature.length) {
       return false;
     }
+
     return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signature, 'hex'));
   }
 }

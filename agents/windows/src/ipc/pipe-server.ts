@@ -85,11 +85,17 @@ export class NamedPipeServer {
         });
 
         socket.on('close', () => {
+          const wasAuthenticated = this.isAuthenticated;
           this.activeSocket = null;
           this.isAuthenticated = false;
           this.currentChallenge = null;
-          for (const handler of this.disconnectHandlers) {
-            handler();
+
+          // BLOCKER R03: Chỉ kích hoạt sự kiện ngắt kết nối khi client đó ĐÃ xác thực thành công.
+          // Các kết nối không xác thực bị đóng TUYỆT ĐỐI KHÔNG làm Watchdog restart tiến trình.
+          if (wasAuthenticated) {
+            for (const handler of this.disconnectHandlers) {
+              handler();
+            }
           }
         });
 
@@ -110,32 +116,62 @@ export class NamedPipeServer {
 
   private handleIncomingMessage(msg: IpcMessage, socket: net.Socket): void {
     if (!this.isAuthenticated) {
-      // 1. Xác thực bằng Challenge-Response Handshake
+      // BLOCKER R02: Cấm hoàn toàn Legacy Plaintext Handshake
+      if (msg.type === IpcMessageType.HANDSHAKE) {
+        this.rejectHandshake(socket, 'LEGACY_HANDSHAKE_DISABLED', 'Plaintext handshake is disabled. Challenge-response is mandatory.');
+        return;
+      }
+
+      // 1. Xác thực bằng Challenge-Response Handshake bắt buộc
       if (msg.type === IpcMessageType.HANDSHAKE_RESPONSE) {
         const payload = msg.payload as IpcHandshakeResponsePayload;
         const now = Date.now();
 
-        // Kiểm tra tính tươi mới (Freshness check trong vòng 60 giây)
+        // 1.1. Kiểm tra tính hợp lệ của Challenge Nonce
+        const challengeToVerify = this.currentChallenge;
+        this.currentChallenge = null; // Tiêu thụ ngay lập tức (Single-Use Nonce)
+
+        if (!challengeToVerify) {
+          this.rejectHandshake(socket, 'NO_CHALLENGE', 'No active challenge pending or challenge already consumed');
+          return;
+        }
+
+        // 1.2. Kiểm tra tính tươi mới (Freshness check trong vòng 60 giây)
         if (!payload || !payload.timestamp || Math.abs(now - payload.timestamp) > 60_000) {
           this.rejectHandshake(socket, 'STALE_HANDSHAKE', 'Handshake timestamp is stale or out of sync');
           return;
         }
 
-        if (!this.currentChallenge) {
-          this.rejectHandshake(socket, 'NO_CHALLENGE', 'No active challenge pending');
+        // 1.3. Kiểm tra các trường policy định danh tiến trình
+        if (!payload.processId || payload.processId <= 0) {
+          this.rejectHandshake(socket, 'INVALID_PROCESS_ID', 'Invalid client process ID in handshake response');
+          return;
+        }
+        if (!payload.windowsSessionId || payload.windowsSessionId <= 0) {
+          this.rejectHandshake(socket, 'INVALID_SESSION_ID', 'Invalid client Windows Session ID in handshake response');
+          return;
+        }
+        if (payload.clientType !== 'INTERACTIVE_AGENT') {
+          this.rejectHandshake(socket, 'INVALID_CLIENT_TYPE', 'Invalid client type in handshake response');
           return;
         }
 
+        // 1.4. Xác thực chữ ký HMAC-SHA256 ràng buộc toàn bộ 6 trường định danh
         const isValid = IpcFraming.verifyHandshakeSignature(
           this.authToken,
-          this.currentChallenge,
-          payload.timestamp,
+          {
+            challenge: challengeToVerify,
+            timestamp: payload.timestamp,
+            processId: payload.processId,
+            windowsSessionId: payload.windowsSessionId,
+            clientType: payload.clientType,
+            version: payload.version || '3.0.0-phase3a'
+          },
           payload.signature
         );
 
         if (isValid) {
           this.isAuthenticated = true;
-          this.currentChallenge = null; // Tiêu thụ challenge nonce
           this.sendMessage({
             id: crypto.randomUUID(),
             type: IpcMessageType.HANDSHAKE_ACK,
@@ -147,29 +183,6 @@ export class NamedPipeServer {
           this.rejectHandshake(socket, 'INVALID_SIGNATURE', 'Cryptographic signature mismatch');
           return;
         }
-      }
-
-      // 2. Tương thích trực tiếp bằng Legacy Handshake (có so sánh constant-time)
-      if (msg.type === IpcMessageType.HANDSHAKE) {
-        const payload = msg.payload as IpcHandshakePayload;
-        if (payload && payload.token && payload.token.length === this.authToken.length) {
-          const isTokenEqual = crypto.timingSafeEqual(
-            Buffer.from(payload.token, 'utf-8'),
-            Buffer.from(this.authToken, 'utf-8')
-          );
-          if (isTokenEqual) {
-            this.isAuthenticated = true;
-            this.sendMessage({
-              id: crypto.randomUUID(),
-              type: IpcMessageType.HANDSHAKE_ACK,
-              timestamp: Date.now(),
-              payload: { status: 'AUTHENTICATED', serverProcessId: process.pid }
-            });
-            return;
-          }
-        }
-        this.rejectHandshake(socket, 'UNAUTHORIZED', 'Invalid IPC handshake token');
-        return;
       }
 
       socket.destroy();
