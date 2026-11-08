@@ -415,3 +415,192 @@ describe('5. Fastify REST API Integration Tests', () => {
     expect(body.data.status).toBe('REVOKED');
   });
 });
+
+describe('6. Ed25519 Cryptographic Challenge-Response Protocol (Anti-Replay Verification)', () => {
+  let auditService: AuditService;
+  let deviceService: DeviceService;
+  const USER_ID = crypto.randomUUID();
+
+  beforeEach(() => {
+    auditService = new AuditService();
+    deviceService = new DeviceService(auditService);
+  });
+
+  it('should generate unpredictable random nonce challenge with 5-minute TTL', async () => {
+    const { publicKey } = CryptoUtil.generateKeyPair();
+    const device = await deviceService.registerDevice({
+      name: 'Cryptographic Agent PC',
+      hardwareIdentifier: 'HW-CHALLENGE-1',
+      publicKey,
+      ownerId: USER_ID
+    });
+
+    const nonce1 = deviceService.createAuthChallenge(device.id);
+    const nonce2 = deviceService.createAuthChallenge(device.id);
+
+    expect(nonce1).toBeDefined();
+    expect(nonce2).toBeDefined();
+    expect(nonce1).not.toBe(nonce2); // Unpredictable
+    expect(nonce1.length).toBe(64);  // 32-byte hex
+  });
+
+  it('should verify valid challenge signature signed with device Ed25519 private key', async () => {
+    const { publicKey, privateKey } = CryptoUtil.generateKeyPair();
+    const device = await deviceService.registerDevice({
+      name: 'Ed25519 PC',
+      hardwareIdentifier: 'HW-ED25519-AUTH',
+      publicKey,
+      ownerId: USER_ID
+    });
+
+    const nonce = deviceService.createAuthChallenge(device.id);
+    const signature = CryptoUtil.signData(privateKey, nonce);
+
+    const isValid = deviceService.verifyAuthChallenge(device.id, nonce, signature);
+    expect(isValid).toBe(true);
+  });
+
+  it('should reject consumed challenge on second attempt (Anti-Replay Challenge Guard)', async () => {
+    const { publicKey, privateKey } = CryptoUtil.generateKeyPair();
+    const device = await deviceService.registerDevice({
+      name: 'Ed25519 PC',
+      hardwareIdentifier: 'HW-REPLAY-CHALLENGE',
+      publicKey,
+      ownerId: USER_ID
+    });
+
+    const nonce = deviceService.createAuthChallenge(device.id);
+    const signature = CryptoUtil.signData(privateKey, nonce);
+
+    // First attempt succeeds
+    expect(deviceService.verifyAuthChallenge(device.id, nonce, signature)).toBe(true);
+
+    // Second attempt MUST FAIL (Anti-replay nonce consumption)
+    expect(() => deviceService.verifyAuthChallenge(device.id, nonce, signature))
+      .toThrow('Challenge already consumed');
+  });
+
+  it('should reject invalid or forged cryptographic signatures', async () => {
+    const pairA = CryptoUtil.generateKeyPair();
+    const pairB = CryptoUtil.generateKeyPair();
+
+    const device = await deviceService.registerDevice({
+      name: 'Target PC',
+      hardwareIdentifier: 'HW-FORGERY-TEST',
+      publicKey: pairA.publicKey,
+      ownerId: USER_ID
+    });
+
+    const nonce = deviceService.createAuthChallenge(device.id);
+    // Attacker signs with a different private key (Pair B)
+    const forgedSignature = CryptoUtil.signData(pairB.privateKey, nonce);
+
+    expect(() => deviceService.verifyAuthChallenge(device.id, nonce, forgedSignature))
+      .toThrow('signature verification failed');
+  });
+});
+
+describe('7. Device Token Storage, Expiration & Revocation Verification', () => {
+  let auditService: AuditService;
+  let deviceService: DeviceService;
+  let pairingService: PairingService;
+  const USER_ID = crypto.randomUUID();
+
+  beforeEach(() => {
+    auditService = new AuditService();
+    deviceService = new DeviceService(auditService);
+    pairingService = new PairingService(deviceService, auditService);
+  });
+
+  it('should issue valid token, hash before storing, and validate active token', async () => {
+    const { publicKey } = CryptoUtil.generateKeyPair();
+    const device = await deviceService.registerDevice({
+      name: 'Token PC',
+      hardwareIdentifier: 'HW-TOKEN-TEST',
+      publicKey,
+      ownerId: USER_ID
+    });
+
+    const pair = await pairingService.startPairing({ deviceId: device.id, userId: USER_ID });
+    const verifyRes = await pairingService.verifyPairing({
+      sessionId: pair.sessionId,
+      pin: pair.pin,
+      userId: USER_ID
+    });
+
+    expect(verifyRes.deviceToken).toBeDefined();
+
+    // Validate token against backend
+    const validated = deviceService.validateDeviceToken(verifyRes.deviceToken);
+    expect(validated.deviceId).toBe(device.id);
+    expect(validated.userId).toBe(USER_ID);
+  });
+
+  it('should IMMEDIATELY invalidate device token when device is revoked', async () => {
+    const { publicKey } = CryptoUtil.generateKeyPair();
+    const device = await deviceService.registerDevice({
+      name: 'Revocable PC',
+      hardwareIdentifier: 'HW-TOKEN-REVOKE-TEST',
+      publicKey,
+      ownerId: USER_ID
+    });
+
+    const pair = await pairingService.startPairing({ deviceId: device.id, userId: USER_ID });
+    const verifyRes = await pairingService.verifyPairing({
+      sessionId: pair.sessionId,
+      pin: pair.pin,
+      userId: USER_ID
+    });
+
+    // Verify token works initially
+    expect(deviceService.validateDeviceToken(verifyRes.deviceToken).deviceId).toBe(device.id);
+
+    // Revoke device
+    await deviceService.revokeDevice(device.id, USER_ID, 'Suspected leak');
+
+    // Subsequent token validation MUST BE REJECTED immediately!
+    expect(() => deviceService.validateDeviceToken(verifyRes.deviceToken))
+      .toThrow('token has been revoked');
+  });
+});
+
+describe('8. Pairing Concurrency & Atomic Race Condition Verification', () => {
+  let auditService: AuditService;
+  let deviceService: DeviceService;
+  let pairingService: PairingService;
+  const USER_ID = crypto.randomUUID();
+
+  beforeEach(() => {
+    auditService = new AuditService();
+    deviceService = new DeviceService(auditService);
+    pairingService = new PairingService(deviceService, auditService);
+  });
+
+  it('should handle simultaneous concurrent pairing verification attempts (only 1 succeeds, concurrent is blocked)', async () => {
+    const { publicKey } = CryptoUtil.generateKeyPair();
+    const device = await deviceService.registerDevice({
+      name: 'Concurrent PC',
+      hardwareIdentifier: 'HW-CONCURRENT-TEST',
+      publicKey,
+      ownerId: USER_ID
+    });
+
+    const session = await pairingService.startPairing({
+      deviceId: device.id,
+      userId: USER_ID
+    });
+
+    // Simulate two simultaneous requests firing with the exact same PIN
+    const results = await Promise.allSettled([
+      pairingService.verifyPairing({ sessionId: session.sessionId, pin: session.pin, userId: USER_ID }),
+      pairingService.verifyPairing({ sessionId: session.sessionId, pin: session.pin, userId: USER_ID })
+    ]);
+
+    const fulfilled = results.filter(r => r.status === 'fulfilled');
+    const rejected = results.filter(r => r.status === 'rejected');
+
+    // EXACTLY 1 MUST SUCCEED, and 1 MUST BE REJECTED (Atomic Guarantee)
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(1);
+  });
+});

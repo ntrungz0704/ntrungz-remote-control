@@ -18,16 +18,14 @@ import { AuditService } from './audit.service';
 
 export class PairingService {
   private sessions = new Map<string, PairingSession>();
+  // Mutex lock map để đảm bảo tính nguyên tử (Atomic Lock) chống race condition
+  private sessionLocks = new Map<string, boolean>();
 
   constructor(
     private deviceService: DeviceService,
     private auditService: AuditService
   ) {}
 
-  /**
-   * Khởi tạo phiên ghép cặp mới
-   * Trả về session ID và PIN 6 số hiển thị cục bộ trên màn hình máy tính (One-time)
-   */
   public async startPairing(input: {
     deviceId: string;
     userId: string;
@@ -43,7 +41,6 @@ export class PairingService {
       throw new DeviceRevokedError('Cannot pair a revoked device');
     }
 
-    // Sinh PIN 6 số an toàn
     const pin = CryptoUtil.generatePin();
     const salt = CryptoUtil.generateSalt();
     const pinHash = CryptoUtil.hashPin(pin, salt);
@@ -74,7 +71,6 @@ export class PairingService {
       ipAddress: input.ipAddress
     });
 
-    // Chỉ trả PIN 1 lần duy nhất này để Windows Agent hiển thị lên màn hình desktop
     return {
       sessionId: session.id,
       pin,
@@ -83,8 +79,7 @@ export class PairingService {
   }
 
   /**
-   * Xác thực mã PIN từ thiết bị điều khiển (Client / Android)
-   * Kiểm tra nghiêm ngặt: Hết hạn, Quá số lần thử, Chống Replay, Khóa Brute-force
+   * Xác thực mã PIN với Atomic Lock chống Concurrency & Race Condition
    */
   public async verifyPairing(input: {
     sessionId: string;
@@ -92,90 +87,103 @@ export class PairingService {
     userId: string;
     ipAddress?: string;
   }): Promise<{ success: boolean; deviceToken: string }> {
-    const session = this.sessions.get(input.sessionId);
-    if (!session) {
-      throw new NotFoundError('Pairing session not found or invalid');
+    // 1. Atomic Concurrency Lock Guard
+    if (this.sessionLocks.get(input.sessionId)) {
+      throw new ValidationError('A verification request is already in progress for this session (Concurrent access blocked)');
     }
 
-    // 1. Chống Replay: Phiên đã xác thực rồi không được dùng lại
-    if (session.status === PairingStatus.VERIFIED) {
-      throw new ValidationError('This pairing session has already been used (Replay attack prevented)');
-    }
+    // Đặt khóa xử lý nguyên tử
+    this.sessionLocks.set(input.sessionId, true);
 
-    // 2. Kiểm tra nếu phiên đã bị thu hồi
-    if (session.status === PairingStatus.REVOKED) {
-      throw new ValidationError('This pairing session has been revoked');
-    }
-
-    // 3. Kiểm tra khóa Brute-force (Locked)
-    const now = new Date();
-    if (session.status === PairingStatus.LOCKED || (session.lockedUntil && session.lockedUntil > now)) {
-      await this.auditService.log({
-        deviceId: session.deviceId,
-        userId: input.userId,
-        eventType: AuditEventType.BRUTE_FORCE_LOCKED,
-        details: { sessionId: session.id, lockedUntil: session.lockedUntil },
-        ipAddress: input.ipAddress
-      });
-      throw new PairingLockedError(`Pairing session locked until ${session.lockedUntil?.toISOString()}`);
-    }
-
-    // 4. Kiểm tra thời hạn hết hạn (Expiration)
-    if (now > session.expiresAt) {
-      session.status = PairingStatus.EXPIRED;
-      throw new PairingExpiredError('Pairing PIN has expired. Please request a new PIN.');
-    }
-
-    // 5. Kiểm tra thiết bị có bị Revoke ở mức Device không
-    const device = this.deviceService.getRawDevice(session.deviceId);
-    if (!device || device.status === DeviceStatus.REVOKED) {
-      throw new DeviceRevokedError('Associated device has been revoked');
-    }
-
-    // 6. Kiểm tra mã PIN (Timing-Safe scrypt hash comparison)
-    const isMatch = CryptoUtil.verifyPin(input.pin, session.salt, session.pinHash);
-
-    if (!isMatch) {
-      session.attemptCount += 1;
-      const remainingAttempts = session.maxAttempts - session.attemptCount;
-
-      await this.auditService.log({
-        deviceId: session.deviceId,
-        userId: input.userId,
-        eventType: AuditEventType.PAIRING_FAILED,
-        details: { sessionId: session.id, attemptCount: session.attemptCount, remainingAttempts },
-        ipAddress: input.ipAddress
-      });
-
-      if (session.attemptCount >= session.maxAttempts) {
-        // Khóa brute-force 15 phút
-        session.status = PairingStatus.LOCKED;
-        session.lockedUntil = new Date(Date.now() + 15 * 60 * 1000);
-        throw new PairingLockedError('Too many failed attempts. Session locked for 15 minutes.');
+    try {
+      const session = this.sessions.get(input.sessionId);
+      if (!session) {
+        throw new NotFoundError('Pairing session not found or invalid');
       }
 
-      throw new ValidationError(`Invalid PIN. You have ${remainingAttempts} attempt(s) remaining.`);
+      // 2. Chống Replay: Đã verify thì từ chối ngay
+      if (session.status === PairingStatus.VERIFIED) {
+        throw new ValidationError('This pairing session has already been used (Replay attack prevented)');
+      }
+
+      // 3. Kiểm tra Revoked
+      if (session.status === PairingStatus.REVOKED) {
+        throw new ValidationError('This pairing session has been revoked');
+      }
+
+      // 4. Kiểm tra Brute-Force Lockout
+      const now = new Date();
+      if (session.status === PairingStatus.LOCKED || (session.lockedUntil && session.lockedUntil > now)) {
+        await this.auditService.log({
+          deviceId: session.deviceId,
+          userId: input.userId,
+          eventType: AuditEventType.BRUTE_FORCE_LOCKED,
+          details: { sessionId: session.id, lockedUntil: session.lockedUntil },
+          ipAddress: input.ipAddress
+        });
+        throw new PairingLockedError(`Pairing session locked until ${session.lockedUntil?.toISOString()}`);
+      }
+
+      // 5. Kiểm tra Expiration
+      if (now > session.expiresAt) {
+        session.status = PairingStatus.EXPIRED;
+        throw new PairingExpiredError('Pairing PIN has expired. Please request a new PIN.');
+      }
+
+      // 6. Kiểm tra Device Status
+      const device = this.deviceService.getRawDevice(session.deviceId);
+      if (!device || device.status === DeviceStatus.REVOKED) {
+        throw new DeviceRevokedError('Associated device has been revoked');
+      }
+
+      // 7. So khớp hash PIN an toàn (Timing-Safe scrypt)
+      const isMatch = CryptoUtil.verifyPin(input.pin, session.salt, session.pinHash);
+
+      if (!isMatch) {
+        session.attemptCount += 1;
+        const remainingAttempts = session.maxAttempts - session.attemptCount;
+
+        await this.auditService.log({
+          deviceId: session.deviceId,
+          userId: input.userId,
+          eventType: AuditEventType.PAIRING_FAILED,
+          details: { sessionId: session.id, attemptCount: session.attemptCount, remainingAttempts },
+          ipAddress: input.ipAddress
+        });
+
+        if (session.attemptCount >= session.maxAttempts) {
+          session.status = PairingStatus.LOCKED;
+          session.lockedUntil = new Date(Date.now() + 15 * 60 * 1000);
+          throw new PairingLockedError('Too many failed attempts. Session locked for 15 minutes.');
+        }
+
+        throw new ValidationError(`Invalid PIN. You have ${remainingAttempts} attempt(s) remaining.`);
+      }
+
+      // 8. Đánh dấu VERIFIED ngay lập tức
+      session.status = PairingStatus.VERIFIED;
+      await this.deviceService.updateStatus(session.deviceId, DeviceStatus.PAIRED);
+
+      // 9. Cấp Device Token an toàn và lưu trữ hash
+      const rawDeviceToken = `dev_tok_${crypto.randomBytes(32).toString('hex')}`;
+      this.deviceService.storeDeviceToken(rawDeviceToken, session.deviceId, input.userId);
+
+      await this.auditService.log({
+        deviceId: session.deviceId,
+        userId: input.userId,
+        eventType: AuditEventType.PAIRING_SUCCESSFUL,
+        details: { sessionId: session.id },
+        ipAddress: input.ipAddress
+      });
+
+      return {
+        success: true,
+        deviceToken: rawDeviceToken
+      };
+    } finally {
+      // Giải phóng khóa nguyên tử
+      this.sessionLocks.delete(input.sessionId);
     }
-
-    // 7. Xác thực thành công: Đánh dấu VERIFIED (One-time use consumption)
-    session.status = PairingStatus.VERIFIED;
-    await this.deviceService.updateStatus(session.deviceId, DeviceStatus.PAIRED);
-
-    // Cấp Device Token ngẫu nhiên (Session Token cho Client)
-    const deviceToken = `dev_tok_${crypto.randomBytes(32).toString('hex')}`;
-
-    await this.auditService.log({
-      deviceId: session.deviceId,
-      userId: input.userId,
-      eventType: AuditEventType.PAIRING_SUCCESSFUL,
-      details: { sessionId: session.id },
-      ipAddress: input.ipAddress
-    });
-
-    return {
-      success: true,
-      deviceToken
-    };
   }
 
   public getSession(sessionId: string): PairingSession | undefined {
