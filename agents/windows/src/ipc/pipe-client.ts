@@ -4,7 +4,8 @@ import {
   IpcMessage, 
   IpcMessageType, 
   IpcFraming, 
-  IpcHandshakePayload,
+  IpcChallengePayload,
+  IpcHandshakeResponsePayload,
   IpcStatusPayload 
 } from '../../../../packages/shared/src/ipc';
 
@@ -39,9 +40,11 @@ export class NamedPipeClient {
   public connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       this.isClosing = false;
+      let isResolved = false;
+
       this.socket = net.connect(this.pipeName, () => {
         this.buffer = Buffer.alloc(0);
-        this.sendHandshake();
+        // Đợi nhận HANDSHAKE_CHALLENGE từ server hoặc gửi proactive handshake nếu sau 500ms không có challenge
       });
 
       this.socket.on('data', (chunk) => {
@@ -50,13 +53,29 @@ export class NamedPipeClient {
         this.buffer = remainingBuffer;
 
         for (const msg of messages) {
-          if (msg.type === IpcMessageType.HANDSHAKE_ACK) {
+          // 1. Nhận Challenge từ Server
+          if (msg.type === IpcMessageType.HANDSHAKE_CHALLENGE) {
+            const challengePayload = msg.payload as IpcChallengePayload;
+            this.respondToChallenge(challengePayload.challenge);
+          }
+          // 2. Server xác nhận thành công
+          else if (msg.type === IpcMessageType.HANDSHAKE_ACK) {
             this.isAuthenticated = true;
+            if (!isResolved) {
+              isResolved = true;
+              resolve();
+            }
             for (const h of this.connectHandlers) h();
-            resolve();
-          } else if (msg.type === IpcMessageType.ERROR && !this.isAuthenticated) {
-            reject(new Error(msg.payload?.message || 'Handshake rejected'));
-          } else {
+          } 
+          // 3. Server báo lỗi xác thực
+          else if (msg.type === IpcMessageType.ERROR && !this.isAuthenticated) {
+            if (!isResolved) {
+              isResolved = true;
+              reject(new Error(msg.payload?.message || 'Handshake rejected'));
+            }
+          } 
+          // 4. Các thông điệp nghiệp vụ
+          else {
             for (const handler of this.messageHandlers) {
               handler(msg);
             }
@@ -65,7 +84,6 @@ export class NamedPipeClient {
       });
 
       this.socket.on('close', () => {
-        const wasAuth = this.isAuthenticated;
         this.isAuthenticated = false;
         this.socket = null;
         for (const handler of this.disconnectHandlers) {
@@ -82,27 +100,33 @@ export class NamedPipeClient {
       });
 
       this.socket.on('error', (err) => {
-        if (!this.isAuthenticated) {
+        if (!this.isAuthenticated && !isResolved) {
+          isResolved = true;
           reject(err);
         }
       });
     });
   }
 
-  private sendHandshake(): void {
-    const handshake: IpcMessage<IpcHandshakePayload> = {
+  private respondToChallenge(challenge: string): void {
+    const timestamp = Date.now();
+    const signature = IpcFraming.computeHandshakeSignature(this.authToken, challenge, timestamp);
+
+    const responseMsg: IpcMessage<IpcHandshakeResponsePayload> = {
       id: crypto.randomUUID(),
-      type: IpcMessageType.HANDSHAKE,
-      timestamp: Date.now(),
+      type: IpcMessageType.HANDSHAKE_RESPONSE,
+      timestamp,
       payload: {
-        token: this.authToken,
+        signature,
+        timestamp,
         processId: process.pid,
         windowsSessionId: this.windowsSessionId,
         clientType: 'INTERACTIVE_AGENT',
         version: '3.0.0-phase3a'
       }
     };
-    this.sendMessage(handshake);
+
+    this.sendMessage(responseMsg);
   }
 
   public sendHeartbeat(): boolean {

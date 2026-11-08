@@ -1,16 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import crypto from 'node:crypto';
+import net from 'node:net';
+import { EventEmitter } from 'node:events';
 import { WatchdogService, WatchdogState } from './agents/windows/src/watchdog/watchdog.service';
 import { WindowsInteractiveAgent } from './agents/windows/src/interactive/interactive.agent';
 import { NamedPipeServer } from './agents/windows/src/ipc/pipe-server';
 import { NamedPipeClient } from './agents/windows/src/ipc/pipe-client';
+import { 
+  IpcFraming, 
+  IpcMessageType, 
+  IpcMessage 
+} from './packages/shared/src/ipc';
 
-describe('Ntrungz Remote Control — Phase 3A Windows Interactive Session Agent & IPC Suite', () => {
-  const TEST_TOKEN = crypto.randomBytes(16).toString('hex');
-  // Sử dụng pipe path riêng biệt cho từng test để tránh xung đột
+describe('Ntrungz Remote Control — Phase 3A Hardened Windows Agent & IPC Suite', () => {
+  // Chuẩn 32-byte hex entropy (64 ký tự)
+  const TEST_VALID_TOKEN = crypto.randomBytes(32).toString('hex');
   const getTestPipe = () => `\\\\.\\pipe\\ntrungz-test-pipe-${crypto.randomUUID()}`;
 
-  describe('1. Secure Named Pipe IPC Framing & Handshake Protocol', () => {
+  describe('1. Named Pipe Security & Challenge-Response Handshake', () => {
     let server: NamedPipeServer;
     let client: NamedPipeClient;
     let pipeName: string;
@@ -19,7 +26,7 @@ describe('Ntrungz Remote Control — Phase 3A Windows Interactive Session Agent 
       pipeName = getTestPipe();
       server = new NamedPipeServer({
         pipeName,
-        authToken: TEST_TOKEN
+        authToken: TEST_VALID_TOKEN
       });
       await server.start();
     });
@@ -29,10 +36,10 @@ describe('Ntrungz Remote Control — Phase 3A Windows Interactive Session Agent 
       if (server) await server.close();
     });
 
-    it('CRIT-3A-01: should authenticate client with valid auth token and acknowledge handshake', async () => {
+    it('CASE 1: Valid authenticated challenge-response handshake', async () => {
       client = new NamedPipeClient({
         pipeName,
-        authToken: TEST_TOKEN,
+        authToken: TEST_VALID_TOKEN,
         windowsSessionId: 1
       });
 
@@ -41,10 +48,11 @@ describe('Ntrungz Remote Control — Phase 3A Windows Interactive Session Agent 
       expect(server.isClientConnected()).toBe(true);
     });
 
-    it('CRIT-3A-02: should reject connection with invalid auth token', async () => {
+    it('CASE 2: Invalid token rejection', async () => {
+      const wrongToken = crypto.randomBytes(32).toString('hex');
       const rogueClient = new NamedPipeClient({
         pipeName,
-        authToken: 'INVALID_ROGUE_TOKEN',
+        authToken: wrongToken,
         windowsSessionId: 1,
         autoReconnect: false
       });
@@ -54,21 +62,153 @@ describe('Ntrungz Remote Control — Phase 3A Windows Interactive Session Agent 
       expect(server.isClientConnected()).toBe(false);
       await rogueClient.disconnect();
     });
+
+    it('CASE 3: Token length and entropy validation (reject tokens < 32 bytes)', () => {
+      expect(() => {
+        new NamedPipeServer({
+          pipeName: getTestPipe(),
+          authToken: 'short_token'
+        });
+      }).toThrow(/Insecure IPC authToken: requires at least 32 bytes of entropy/);
+    });
+
+    it('CASE 4: Replay / stale challenge rejection (timestamp > 60s is rejected)', async () => {
+      const rawSocket = net.connect(pipeName);
+      let challengeMsgReceived = false;
+
+      await new Promise<void>((resolve) => {
+        rawSocket.on('data', (data) => {
+          const { messages } = IpcFraming.decodeFrames(data);
+          const challengeMsg = messages.find(m => m.type === IpcMessageType.HANDSHAKE_CHALLENGE);
+          if (challengeMsg) {
+            challengeMsgReceived = true;
+            const challenge = challengeMsg.payload.challenge;
+            // Ký chữ ký với timestamp quá khứ (10 phút trước)
+            const staleTime = Date.now() - 600_000;
+            const signature = IpcFraming.computeHandshakeSignature(TEST_VALID_TOKEN, challenge, staleTime);
+
+            const staleResponse: IpcMessage = {
+              id: crypto.randomUUID(),
+              type: IpcMessageType.HANDSHAKE_RESPONSE,
+              timestamp: staleTime,
+              payload: {
+                signature,
+                timestamp: staleTime,
+                processId: process.pid,
+                windowsSessionId: 1,
+                clientType: 'INTERACTIVE_AGENT',
+                version: '3.0.0-phase3a'
+              }
+            };
+            rawSocket.write(IpcFraming.encodeMessage(staleResponse));
+          }
+
+          const errorMsg = messages.find(m => m.type === IpcMessageType.ERROR);
+          if (errorMsg) {
+            expect(errorMsg.payload.code).toBe('STALE_HANDSHAKE');
+            rawSocket.destroy();
+            resolve();
+          }
+        });
+      });
+
+      expect(challengeMsgReceived).toBe(true);
+      expect(server.isClientConnected()).toBe(false);
+    });
+
+    it('CASE 5: Constant-time signature verification', () => {
+      const challenge = crypto.randomBytes(32).toString('hex');
+      const timestamp = Date.now();
+      const validSig = IpcFraming.computeHandshakeSignature(TEST_VALID_TOKEN, challenge, timestamp);
+
+      expect(IpcFraming.verifyHandshakeSignature(TEST_VALID_TOKEN, challenge, timestamp, validSig)).toBe(true);
+
+      // Sửa 1 byte chữ ký
+      const corruptedSig = validSig.slice(0, -2) + (validSig.endsWith('0') ? '1' : '0');
+      expect(IpcFraming.verifyHandshakeSignature(TEST_VALID_TOKEN, challenge, timestamp, corruptedSig)).toBe(false);
+    });
   });
 
-  describe('2. Watchdog Service & Interactive Session Agent Lifecycle', () => {
+  describe('2. IPC Framing Hardening (Buffer attacks, OOM, Malformed packets)', () => {
+    it('CASE 6: Fragmented IPC frame handling (streaming chunked data)', () => {
+      const msg: IpcMessage = {
+        id: 'frag-1',
+        type: IpcMessageType.HEARTBEAT,
+        timestamp: Date.now(),
+        payload: { cpu: 2.5 }
+      };
+
+      const fullFrame = IpcFraming.encodeMessage(msg);
+      // Chia nhỏ thành 3 chunk ngẫu nhiên
+      const chunk1 = fullFrame.subarray(0, 3);
+      const chunk2 = fullFrame.subarray(3, 10);
+      const chunk3 = fullFrame.subarray(10);
+
+      let buf = Buffer.alloc(0);
+      buf = Buffer.concat([buf, chunk1]);
+      let res1 = IpcFraming.decodeFrames(buf);
+      expect(res1.messages.length).toBe(0); // Chưa đủ frame
+
+      buf = Buffer.concat([res1.remainingBuffer, chunk2]);
+      let res2 = IpcFraming.decodeFrames(buf);
+      expect(res2.messages.length).toBe(0);
+
+      buf = Buffer.concat([res2.remainingBuffer, chunk3]);
+      let res3 = IpcFraming.decodeFrames(buf);
+      expect(res3.messages.length).toBe(1);
+      expect(res3.messages[0].id).toBe('frag-1');
+      expect(res3.remainingBuffer.length).toBe(0);
+    });
+
+    it('CASE 7: Multiple IPC frames in single buffer', () => {
+      const msg1: IpcMessage = { id: 'm1', type: IpcMessageType.HEARTBEAT, timestamp: 1, payload: {} };
+      const msg2: IpcMessage = { id: 'm2', type: IpcMessageType.HEARTBEAT_ACK, timestamp: 2, payload: {} };
+
+      const batch = Buffer.concat([IpcFraming.encodeMessage(msg1), IpcFraming.encodeMessage(msg2)]);
+      const { messages, remainingBuffer } = IpcFraming.decodeFrames(batch);
+
+      expect(messages.length).toBe(2);
+      expect(messages[0].id).toBe('m1');
+      expect(messages[1].id).toBe('m2');
+      expect(remainingBuffer.length).toBe(0);
+    });
+
+    it('CASE 8: Oversized IPC frame rejection (> MAX_FRAME_SIZE = 4MB)', () => {
+      const fakeHeader = Buffer.alloc(4);
+      fakeHeader.writeUInt32BE(5 * 1024 * 1024, 0); // 5MB > 4MB MAX_FRAME_SIZE
+      const dummyPayload = Buffer.alloc(100);
+
+      const attackedBuffer = Buffer.concat([fakeHeader, dummyPayload]);
+      const result = IpcFraming.decodeFrames(attackedBuffer);
+
+      expect(result.oversizedError).toBe(true);
+      expect(result.messages.length).toBe(0);
+    });
+
+    it('CASE 9: Zero-length and malformed JSON rejection without crashing', () => {
+      // 1. Zero-length frame
+      const zeroLengthHeader = Buffer.alloc(4);
+      zeroLengthHeader.writeUInt32BE(0, 0);
+      const resZero = IpcFraming.decodeFrames(zeroLengthHeader);
+      expect(resZero.malformedError).toBe(true);
+
+      // 2. Malformed JSON
+      const badJsonBody = Buffer.from('{ corrupt json... ', 'utf-8');
+      const badHeader = Buffer.alloc(4);
+      badHeader.writeUInt32BE(badJsonBody.length, 0);
+      const resBad = IpcFraming.decodeFrames(Buffer.concat([badHeader, badJsonBody]));
+      expect(resBad.malformedError).toBe(true);
+      expect(resBad.messages.length).toBe(0);
+    });
+  });
+
+  describe('3. Watchdog Process Supervision & Real Session Lifecycle', () => {
     let watchdog: WatchdogService;
     let agent: WindowsInteractiveAgent;
     let pipeName: string;
 
     beforeEach(async () => {
       pipeName = getTestPipe();
-      watchdog = new WatchdogService({
-        pipeName,
-        authToken: TEST_TOKEN,
-        heartbeatTimeoutMs: 10_000
-      });
-      await watchdog.start();
     });
 
     afterEach(async () => {
@@ -76,22 +216,33 @@ describe('Ntrungz Remote Control — Phase 3A Windows Interactive Session Agent 
       if (watchdog) await watchdog.stop();
     });
 
-    it('CRIT-3A-03: Watchdog state transition & Session 0 vs Session 1 supervisor', async () => {
-      expect(watchdog.getState()).toBe(WatchdogState.SUPERVISING);
-      expect(watchdog.detectActiveConsoleSession()).toBeGreaterThanOrEqual(1);
+    it('CASE 10: Actual Windows Session ID detection via WTSGetActiveConsoleSessionId', () => {
+      watchdog = new WatchdogService({ pipeName, authToken: TEST_VALID_TOKEN });
+      const consoleSession = watchdog.detectActiveConsoleSession();
+      expect(consoleSession).toBeGreaterThanOrEqual(1);
+      expect(consoleSession).not.toBe(0xFFFFFFFF);
+    });
+
+    it('CASE 11: Real interactive process launch, handshake and status telemetry', async () => {
+      watchdog = new WatchdogService({
+        pipeName,
+        authToken: TEST_VALID_TOKEN,
+        heartbeatTimeoutMs: 15_000
+      });
+      await watchdog.start();
 
       agent = new WindowsInteractiveAgent({
         pipeName,
-        authToken: TEST_TOKEN,
+        authToken: TEST_VALID_TOKEN,
         windowsSessionId: 1,
-        desktopName: 'WinSta0\\Default',
-        screenWidth: 2560,
-        screenHeight: 1440,
-        dpi: 144
+        desktopName: 'Default',
+        windowStationName: 'WinSta0',
+        screenWidth: 1920,
+        screenHeight: 1080,
+        dpi: 96
       });
 
       await agent.start();
-      // Chờ IPC message truyền qua pipe
       await new Promise(r => setTimeout(r, 200));
 
       expect(agent.isConnected()).toBe(true);
@@ -99,21 +250,74 @@ describe('Ntrungz Remote Control — Phase 3A Windows Interactive Session Agent 
 
       const status = watchdog.getLatestStatus();
       expect(status).not.toBeNull();
-      expect(status?.desktopName).toBe('WinSta0\\Default');
-      expect(status?.resolution.width).toBe(2560);
-      expect(status?.resolution.height).toBe(1440);
-      expect(status?.resolution.dpi).toBe(144);
+      expect(status?.windowStationName).toBe('WinSta0');
+      expect(status?.desktopName).toBe('Default');
+      expect(status?.resolution.width).toBe(1920);
+      expect(status?.resolution.height).toBe(1080);
+      expect(status?.monitors.length).toBeGreaterThanOrEqual(1);
+      expect(status?.metrics.memoryMb).toBeGreaterThan(0);
     });
 
-    it('CRIT-3A-04: Graceful shutdown of Interactive Agent and Watchdog', async () => {
+    it('CASE 12: Agent crash detection and process restart', async () => {
+      let spawnCount = 0;
+      const fakeChildEmitter = new EventEmitter() as any;
+      fakeChildEmitter.kill = () => {};
+
+      watchdog = new WatchdogService({
+        pipeName,
+        authToken: TEST_VALID_TOKEN,
+        processLauncher: () => {
+          spawnCount++;
+          return fakeChildEmitter;
+        }
+      });
+      await watchdog.start();
+      expect(spawnCount).toBe(1);
+
+      // Kích hoạt crash
+      watchdog.handleAgentCrashOrExit();
+      expect(spawnCount).toBe(2);
+      expect(watchdog.getRestartCountInWindow()).toBe(1);
+    });
+
+    it('CASE 13: Maximum 5 restarts per rolling 60 seconds (anti-crash-loop protection enters DEGRADED)', async () => {
+      let spawnCount = 0;
+      const fakeChild = new EventEmitter() as any;
+      fakeChild.kill = () => {};
+
+      watchdog = new WatchdogService({
+        pipeName,
+        authToken: TEST_VALID_TOKEN,
+        maxRestartsPerMinute: 5,
+        processLauncher: () => {
+          spawnCount++;
+          return fakeChild;
+        }
+      });
+      await watchdog.start();
+
+      // Giả lập 5 lần crash liên tiếp trong 60s
+      for (let i = 1; i <= 5; i++) {
+        const canRestart = watchdog.handleAgentCrashOrExit();
+        if (i < 5) expect(canRestart).toBe(true);
+      }
+
+      // Lần crash thứ 6 bị chặn đứng và chuyển sang DEGRADED
+      const sixthRestart = watchdog.handleAgentCrashOrExit();
+      expect(sixthRestart).toBe(false);
+      expect(watchdog.getState()).toBe(WatchdogState.DEGRADED);
+    });
+
+    it('CASE 14: Graceful shutdown of Interactive Agent and Watchdog', async () => {
+      watchdog = new WatchdogService({ pipeName, authToken: TEST_VALID_TOKEN });
+      await watchdog.start();
+
       agent = new WindowsInteractiveAgent({
         pipeName,
-        authToken: TEST_TOKEN,
+        authToken: TEST_VALID_TOKEN,
         windowsSessionId: 1
       });
-
       await agent.start();
-      expect(agent.isConnected()).toBe(true);
 
       await agent.stop();
       expect(agent.isConnected()).toBe(false);

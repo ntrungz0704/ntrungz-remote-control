@@ -4,7 +4,9 @@ import {
   IpcMessage, 
   IpcMessageType, 
   IpcFraming, 
-  IpcHandshakePayload 
+  IpcHandshakePayload,
+  IpcHandshakeResponsePayload,
+  IpcChallengePayload 
 } from '../../../../packages/shared/src/ipc';
 
 export interface PipeServerOptions {
@@ -19,6 +21,8 @@ export class NamedPipeServer {
   private isAuthenticated = false;
   private pipeName: string;
   private authToken: string;
+  private currentChallenge: string | null = null;
+  private challengeIssuedAt = 0;
 
   private messageHandlers: Array<(msg: IpcMessage) => void> = [];
   private disconnectHandlers: Array<() => void> = [];
@@ -26,6 +30,11 @@ export class NamedPipeServer {
   constructor(options: PipeServerOptions) {
     this.pipeName = options.pipeName || '\\\\.\\pipe\\ntrungz-remote-agent-ipc';
     this.authToken = options.authToken;
+
+    // Kiểm tra độ an toàn của auth token (tối thiểu 32 bytes entropy = 64 hex chars hoặc 32 chars)
+    if (!this.authToken || this.authToken.length < 32) {
+      throw new Error(`Insecure IPC authToken: requires at least 32 bytes of entropy (got ${this.authToken?.length || 0})`);
+    }
   }
 
   public start(): Promise<void> {
@@ -41,10 +50,34 @@ export class NamedPipeServer {
         this.isAuthenticated = false;
         this.buffer = Buffer.alloc(0);
 
+        // Sinh challenge ngẫu nhiên để chống tấn công replay / stale
+        this.currentChallenge = crypto.randomBytes(32).toString('hex');
+        this.challengeIssuedAt = Date.now();
+
+        const challengeMsg: IpcMessage<IpcChallengePayload> = {
+          id: crypto.randomUUID(),
+          type: IpcMessageType.HANDSHAKE_CHALLENGE,
+          timestamp: this.challengeIssuedAt,
+          payload: {
+            challenge: this.currentChallenge,
+            serverProcessId: process.pid,
+            serverSessionId: 0
+          }
+        };
+
+        const frame = IpcFraming.encodeMessage(challengeMsg);
+        socket.write(frame);
+
         socket.on('data', (chunk) => {
           this.buffer = Buffer.concat([this.buffer, chunk]);
-          const { messages, remainingBuffer } = IpcFraming.decodeFrames(this.buffer);
+          const { messages, remainingBuffer, oversizedError, malformedError } = IpcFraming.decodeFrames(this.buffer);
           this.buffer = remainingBuffer;
+
+          if (oversizedError) {
+            console.error('[NamedPipeServer] Oversized frame detected, closing connection');
+            socket.destroy();
+            return;
+          }
 
           for (const msg of messages) {
             this.handleIncomingMessage(msg, socket);
@@ -54,13 +87,14 @@ export class NamedPipeServer {
         socket.on('close', () => {
           this.activeSocket = null;
           this.isAuthenticated = false;
+          this.currentChallenge = null;
           for (const handler of this.disconnectHandlers) {
             handler();
           }
         });
 
         socket.on('error', (err) => {
-          console.error('[NamedPipeServer] Socket error:', err.message);
+          // Socket error gracefully handled
         });
       });
 
@@ -76,10 +110,32 @@ export class NamedPipeServer {
 
   private handleIncomingMessage(msg: IpcMessage, socket: net.Socket): void {
     if (!this.isAuthenticated) {
-      if (msg.type === IpcMessageType.HANDSHAKE) {
-        const payload = msg.payload as IpcHandshakePayload;
-        if (payload && payload.token === this.authToken) {
+      // 1. Xác thực bằng Challenge-Response Handshake
+      if (msg.type === IpcMessageType.HANDSHAKE_RESPONSE) {
+        const payload = msg.payload as IpcHandshakeResponsePayload;
+        const now = Date.now();
+
+        // Kiểm tra tính tươi mới (Freshness check trong vòng 60 giây)
+        if (!payload || !payload.timestamp || Math.abs(now - payload.timestamp) > 60_000) {
+          this.rejectHandshake(socket, 'STALE_HANDSHAKE', 'Handshake timestamp is stale or out of sync');
+          return;
+        }
+
+        if (!this.currentChallenge) {
+          this.rejectHandshake(socket, 'NO_CHALLENGE', 'No active challenge pending');
+          return;
+        }
+
+        const isValid = IpcFraming.verifyHandshakeSignature(
+          this.authToken,
+          this.currentChallenge,
+          payload.timestamp,
+          payload.signature
+        );
+
+        if (isValid) {
           this.isAuthenticated = true;
+          this.currentChallenge = null; // Tiêu thụ challenge nonce
           this.sendMessage({
             id: crypto.randomUUID(),
             type: IpcMessageType.HANDSHAKE_ACK,
@@ -88,19 +144,36 @@ export class NamedPipeServer {
           });
           return;
         } else {
-          this.sendMessage({
-            id: crypto.randomUUID(),
-            type: IpcMessageType.ERROR,
-            timestamp: Date.now(),
-            payload: { code: 'UNAUTHORIZED', message: 'Invalid IPC handshake token' }
-          });
-          socket.destroy();
+          this.rejectHandshake(socket, 'INVALID_SIGNATURE', 'Cryptographic signature mismatch');
           return;
         }
-      } else {
-        socket.destroy();
+      }
+
+      // 2. Tương thích trực tiếp bằng Legacy Handshake (có so sánh constant-time)
+      if (msg.type === IpcMessageType.HANDSHAKE) {
+        const payload = msg.payload as IpcHandshakePayload;
+        if (payload && payload.token && payload.token.length === this.authToken.length) {
+          const isTokenEqual = crypto.timingSafeEqual(
+            Buffer.from(payload.token, 'utf-8'),
+            Buffer.from(this.authToken, 'utf-8')
+          );
+          if (isTokenEqual) {
+            this.isAuthenticated = true;
+            this.sendMessage({
+              id: crypto.randomUUID(),
+              type: IpcMessageType.HANDSHAKE_ACK,
+              timestamp: Date.now(),
+              payload: { status: 'AUTHENTICATED', serverProcessId: process.pid }
+            });
+            return;
+          }
+        }
+        this.rejectHandshake(socket, 'UNAUTHORIZED', 'Invalid IPC handshake token');
         return;
       }
+
+      socket.destroy();
+      return;
     }
 
     // Xử lý các thông điệp khi đã xác thực
@@ -116,6 +189,16 @@ export class NamedPipeServer {
     for (const handler of this.messageHandlers) {
       handler(msg);
     }
+  }
+
+  private rejectHandshake(socket: net.Socket, code: string, message: string): void {
+    this.sendMessage({
+      id: crypto.randomUUID(),
+      type: IpcMessageType.ERROR,
+      timestamp: Date.now(),
+      payload: { code, message }
+    });
+    socket.destroy();
   }
 
   public sendMessage(msg: IpcMessage): boolean {
