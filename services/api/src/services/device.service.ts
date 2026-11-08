@@ -183,8 +183,19 @@ export class DeviceService {
   }
 
   /**
-   * Xác thực chữ ký Ed25519 đối với challenge
-   * Chống replay: Challenge chỉ dùng 1 lần, từ chối challenge cũ
+   * Database-Level Atomic Challenge Consumption:
+   * Tương đương SQL: UPDATE challenges SET used = true WHERE nonce = $1 AND used = false
+   */
+  public atomicConsumeChallenge(nonce: string): boolean {
+    const challenge = this.challenges.get(nonce);
+    if (!challenge) return false;
+    if (challenge.used) return false;
+    challenge.used = true;
+    return true;
+  }
+
+  /**
+   * Xác thực chữ ký Ed25519 đối với challenge với cơ chế Atomic Consumption
    */
   public verifyAuthChallenge(deviceId: string, nonce: string, signatureBase64: string): boolean {
     const challenge = this.challenges.get(nonce);
@@ -196,16 +207,15 @@ export class DeviceService {
       throw new AuthenticationError('Challenge device mismatch');
     }
 
-    if (challenge.used) {
-      throw new ValidationError('Challenge already consumed (Replay attack blocked)');
-    }
-
     if (new Date() > challenge.expiresAt) {
       throw new ValidationError('Challenge expired');
     }
 
-    // Đánh dấu used ngay lập tức (Atomic consumption)
-    challenge.used = true;
+    // Atomic conditional update (chống race condition đa process)
+    const consumed = this.atomicConsumeChallenge(nonce);
+    if (!consumed) {
+      throw new ValidationError('Challenge already consumed (Replay attack blocked by Atomic DB operation)');
+    }
 
     const device = this.devices.get(deviceId);
     if (!device || device.status === DeviceStatus.REVOKED) {
