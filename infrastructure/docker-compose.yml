@@ -33,6 +33,15 @@ services:
       timeout: 5s
       retries: 5
 
+  coturn:
+    image: coturn/coturn:latest
+    container_name: ntrungz-remote-coturn
+    restart: always
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+
 volumes:
   postgres_data:
   redis_data:

@@ -3,11 +3,26 @@ import cors from '@fastify/cors';
 import { AuditService } from './services/audit.service';
 import { DeviceService } from './services/device.service';
 import { PairingService } from './services/pairing.service';
+import { SessionService } from './services/session.service';
+import { PresenceService } from './services/presence.service';
+import { SignalingHub } from './signaling/signaling.hub';
 import { deviceRoutes } from './routes/device.routes';
 import { pairingRoutes } from './routes/pairing.routes';
+import { sessionRoutes } from './routes/session.routes';
+import { presenceRoutes } from './routes/presence.routes';
 import { AppError } from '../../../packages/shared/src/errors';
 
-export function buildApp(): FastifyInstance {
+export type AppContext = FastifyInstance & {
+  app: FastifyInstance;
+  deviceService: DeviceService;
+  pairingService: PairingService;
+  sessionService: SessionService;
+  presenceService: PresenceService;
+  signalingHub: SignalingHub;
+  auditService: AuditService;
+};
+
+export function buildApp(): AppContext {
   const app = Fastify({
     logger: false
   });
@@ -19,8 +34,11 @@ export function buildApp(): FastifyInstance {
   const auditService = new AuditService();
   const deviceService = new DeviceService(auditService);
   const pairingService = new PairingService(deviceService, auditService);
+  const sessionService = new SessionService(deviceService, auditService);
+  const presenceService = new PresenceService(deviceService, sessionService, auditService);
+  const signalingHub = new SignalingHub(deviceService, sessionService);
 
-  // Consistent Error Handler
+  // Error Handler
   app.setErrorHandler((error, req, reply) => {
     if (error instanceof AppError) {
       return reply.status(error.statusCode).send({
@@ -47,13 +65,23 @@ export function buildApp(): FastifyInstance {
       status: 'UP',
       timestamp: new Date().toISOString(),
       service: 'ntrungz-remote-control-api',
-      version: '1.0.0'
+      version: '2.0.0-phase2'
     };
   });
 
   // Register routes
   deviceRoutes(app, deviceService);
   pairingRoutes(app, pairingService);
+  sessionRoutes(app, sessionService);
+  presenceRoutes(app, presenceService);
 
-  return app;
+  return Object.assign(app, {
+    app,
+    deviceService,
+    pairingService,
+    sessionService,
+    presenceService,
+    signalingHub,
+    auditService
+  });
 }

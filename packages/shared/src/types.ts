@@ -25,6 +25,13 @@ export enum DeviceType {
   WEB_BROWSER = 'WEB_BROWSER'
 }
 
+export enum RemoteSessionStatus {
+  CONNECTING = 'CONNECTING',
+  ACTIVE = 'ACTIVE',
+  DISCONNECTED = 'DISCONNECTED',
+  FAILED = 'FAILED'
+}
+
 export enum AuditEventType {
   DEVICE_REGISTERED = 'DEVICE_REGISTERED',
   PAIRING_REQUESTED = 'PAIRING_REQUESTED',
@@ -32,7 +39,46 @@ export enum AuditEventType {
   PAIRING_FAILED = 'PAIRING_FAILED',
   BRUTE_FORCE_LOCKED = 'BRUTE_FORCE_LOCKED',
   DEVICE_REVOKED = 'DEVICE_REVOKED',
-  DEVICE_ACCESSED = 'DEVICE_ACCESSED'
+  DEVICE_ACCESSED = 'DEVICE_ACCESSED',
+  REMOTE_SESSION_CREATED = 'REMOTE_SESSION_CREATED',
+  REMOTE_SESSION_ACTIVE = 'REMOTE_SESSION_ACTIVE',
+  REMOTE_SESSION_ENDED = 'REMOTE_SESSION_ENDED',
+  DEVICE_HEARTBEAT = 'DEVICE_HEARTBEAT'
+}
+
+export enum SignalingMessageType {
+  REGISTER = 'REGISTER',
+  REGISTERED = 'REGISTERED',
+  OFFER = 'OFFER',
+  ANSWER = 'ANSWER',
+  CANDIDATE = 'CANDIDATE',
+  HEARTBEAT = 'HEARTBEAT',
+  HEARTBEAT_ACK = 'HEARTBEAT_ACK',
+  SESSION_START = 'SESSION_START',
+  SESSION_END = 'SESSION_END',
+  ERROR = 'ERROR'
+}
+
+export interface SignalingMessage {
+  type: SignalingMessageType;
+  sessionId?: string;
+  senderId?: string;
+  targetId?: string;
+  sdp?: string;
+  candidate?: {
+    candidate: string;
+    sdpMid?: string | null;
+    sdpMLineIndex?: number | null;
+  };
+  payload?: any;
+  error?: string;
+  timestamp?: number;
+}
+
+export interface IceServerConfig {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
 }
 
 export interface User {
@@ -48,8 +94,8 @@ export interface Device {
   id: string;
   name: string;
   deviceType: DeviceType;
-  hardwareIdentifier: string; // MachineGuid or TPM fingerprint
-  publicKey: string;          // Ed25519/RSA Public Key
+  hardwareIdentifier: string;
+  publicKey: string;
   ownerId: string;
   status: DeviceStatus;
   osInfo?: string;
@@ -57,6 +103,32 @@ export interface Device {
   lastSeenAt?: Date;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface RemoteSession {
+  id: string;
+  deviceId: string;
+  clientId: string;
+  clientUserId: string;
+  status: RemoteSessionStatus;
+  sessionToken: string;
+  startedAt?: Date;
+  endedAt?: Date;
+  bytesTransferred: number;
+  latencyMs?: number;
+  ipAddress?: string;
+  userAgent?: string;
+  createdAt: Date;
+}
+
+export interface DevicePresence {
+  deviceId: string;
+  status: DeviceStatus;
+  lastSeenAt: Date;
+  ipAddress?: string;
+  activeSessionCount: number;
+  isReachable: boolean;
+  isAvailableForNewSession: boolean;
 }
 
 export interface PairingSession {
