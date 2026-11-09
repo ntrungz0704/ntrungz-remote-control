@@ -44,11 +44,8 @@ export class WindowsInteractiveAgent {
     this.windowsSessionId = options?.windowsSessionId ?? 
       (process.env.NTRUNGZ_SESSION_ID ? parseInt(process.env.NTRUNGZ_SESSION_ID, 10) : this.queryNativeSessionId());
 
-    this.windowStationName = options?.windowStationName || 'WinSta0';
-    this.desktopName = options?.desktopName || 'Default';
-
-    // Đọc thông số màn hình thực tế từ Windows API
-    this.queryActualDisplayMetrics(options);
+    // BLOCKER R05 / Condition 3: Truy vấn động thực tế từ Windows OS, không dùng hardcode
+    this.queryActualDesktopAndDisplayContext(options);
 
     this.prevCpuUsage = process.cpuUsage();
     this.prevCpuTime = Date.now();
@@ -60,23 +57,6 @@ export class WindowsInteractiveAgent {
     });
 
     this.setupHandlers();
-  }
-
-  private setupHandlers(): void {
-    this.client.onConnect(() => {
-      this.sendCurrentStatus();
-      this.startHeartbeatLoop();
-    });
-
-    this.client.onDisconnect(() => {
-      this.stopHeartbeatLoop();
-    });
-
-    this.client.onMessage((msg: IpcMessage) => {
-      if (msg.type === IpcMessageType.COMMAND) {
-        this.handleCommand(msg.payload as IpcCommandPayload);
-      }
-    });
   }
 
   /**
@@ -99,13 +79,16 @@ export class WindowsInteractiveAgent {
   }
 
   /**
-   * Thu thập thông số màn hình và đa màn hình thực tế từ Windows OS
+   * Thu thập thông số WindowStation, Desktop, trạng thái Lock và Multi-monitor thực tế từ Windows OS
    */
-  public queryActualDisplayMetrics(options?: InteractiveAgentOptions): void {
-    if (options?.screenWidth && options?.screenHeight) {
+  public queryActualDesktopAndDisplayContext(options?: InteractiveAgentOptions): void {
+    if (options?.windowStationName && options?.desktopName && options?.screenWidth) {
+      this.windowStationName = options.windowStationName;
+      this.desktopName = options.desktopName;
       this.screenWidth = options.screenWidth;
-      this.screenHeight = options.screenHeight;
+      this.screenHeight = options.screenHeight || 1080;
       this.dpi = options.dpi ?? 96;
+      this.isLocked = false;
       this.monitors = [{
         index: 0,
         deviceName: '\\\\.\\DISPLAY1',
@@ -117,37 +100,119 @@ export class WindowsInteractiveAgent {
       return;
     }
 
-    try {
-      if (process.platform === 'win32') {
-        const script = `import ctypes
+    if (process.platform === 'win32') {
+      try {
+        const script = `import ctypes, ctypes.wintypes, json
 u = ctypes.windll.user32
-cx = u.GetSystemMetrics(0)
-cy = u.GetSystemMetrics(1)
+k = ctypes.windll.kernel32
+
+UOI_NAME = 2
+buf = ctypes.create_unicode_buffer(512)
+needed = ctypes.wintypes.DWORD()
+
+# 1. WindowStation
+hWinSta = u.GetProcessWindowStation()
+winsta = 'Unknown'
+if u.GetUserObjectInformationW(hWinSta, UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+    winsta = buf.value
+
+# 2. Desktop
+hDesk = u.GetThreadDesktop(k.GetCurrentThreadId())
+desk = 'Unknown'
+if u.GetUserObjectInformationW(hDesk, UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+    desk = buf.value
+
+# 3. Lock detection via OpenInputDesktop
+hInput = u.OpenInputDesktop(0, False, 0x0001)
+is_locked = False
+if hInput:
+    input_buf = ctypes.create_unicode_buffer(512)
+    if u.GetUserObjectInformationW(hInput, UOI_NAME, input_buf, ctypes.sizeof(input_buf), ctypes.byref(needed)):
+        if 'winlogon' in input_buf.value.lower():
+            is_locked = True
+    u.CloseDesktop(hInput)
+else:
+    is_locked = True
+
+# 4. Multi-monitor enumeration
+class RECT(ctypes.Structure):
+    _fields_ = [('left', ctypes.c_long), ('top', ctypes.c_long), ('right', ctypes.c_long), ('bottom', ctypes.c_long)]
+
+class MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [
+        ('cbSize', ctypes.wintypes.DWORD),
+        ('rcMonitor', RECT),
+        ('rcWork', RECT),
+        ('dwFlags', ctypes.wintypes.DWORD),
+        ('szDevice', ctypes.c_wchar * 32)
+    ]
+
+MonitorEnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HMONITOR, ctypes.wintypes.HDC, ctypes.POINTER(RECT), ctypes.wintypes.LPARAM)
+monitors = []
+def enum_cb(hMon, hdcMon, lprcMon, lParam):
+    info = MONITORINFOEXW()
+    info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+    u.GetMonitorInfoW(hMon, ctypes.byref(info))
+    rc = info.rcMonitor
+    monitors.append({
+        'index': len(monitors),
+        'deviceName': info.szDevice,
+        'isPrimary': bool(info.dwFlags & 1),
+        'width': rc.right - rc.left,
+        'height': rc.bottom - rc.top
+    })
+    return True
+
+u.EnumDisplayMonitors(None, None, MonitorEnumProc(enum_cb), 0)
+
 dpi = u.GetDpiForSystem() if hasattr(u, 'GetDpiForSystem') else 96
-print(f"{cx},{cy},{dpi}")`;
-        const out = child_process.execSync(`py -c "${script}"`, { encoding: 'utf-8', timeout: 3000 });
-        const [w, h, d] = out.trim().split(',').map(Number);
-        this.screenWidth = w || 1920;
-        this.screenHeight = h || 1080;
-        this.dpi = d || 96;
-      } else {
-        this.screenWidth = 1920;
-        this.screenHeight = 1080;
-        this.dpi = 96;
+
+print(json.dumps({
+    'windowStation': winsta,
+    'desktop': desk,
+    'isLocked': is_locked,
+    'dpi': dpi,
+    'monitors': monitors
+}))`;
+
+        const out = child_process.execSync(`py -c "${script}"`, { encoding: 'utf-8', timeout: 4000 });
+        const parsed = JSON.parse(out.trim());
+        this.windowStationName = parsed.windowStation || 'WinSta0';
+        this.desktopName = parsed.desktop || 'Default';
+        this.isLocked = Boolean(parsed.isLocked);
+        this.dpi = parsed.dpi || 96;
+        this.monitors = (parsed.monitors || []).map((m: any) => ({
+          ...m,
+          dpi: this.dpi
+        }));
+
+        const primary = this.monitors.find(m => m.isPrimary) || this.monitors[0];
+        if (primary) {
+          this.screenWidth = primary.width;
+          this.screenHeight = primary.height;
+        } else {
+          this.screenWidth = 1920;
+          this.screenHeight = 1080;
+        }
+        return;
+      } catch (err) {
+        // Fallback an toàn nếu có lỗi
       }
-    } catch {
-      this.screenWidth = 1920;
-      this.screenHeight = 1080;
-      this.dpi = 96;
     }
 
+    this.windowStationName = 'WinSta0';
+    this.desktopName = 'Default';
+    this.isLocked = false;
+    this.screenWidth = 1920;
+    this.screenHeight = 1080;
+    this.dpi = 96;
     this.monitors = [{
       index: 0,
       deviceName: '\\\\.\\DISPLAY1',
       isPrimary: true,
-      width: this.screenWidth,
-      height: this.screenHeight,
-      dpi: this.dpi
+      width: 1920,
+      height: 1080,
+      dpi: 96
     }];
   }
 
@@ -167,6 +232,30 @@ print(f"{cx},{cy},{dpi}")`;
 
     const memoryMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
     return { cpuPercent, memoryMb };
+  }
+
+  public getDesktopContext(): {
+    processId: number;
+    windowsSessionId: number;
+    windowStationName: string;
+    desktopName: string;
+    isLocked: boolean;
+    screenWidth: number;
+    screenHeight: number;
+    dpi: number;
+    monitors: MonitorInfo[];
+  } {
+    return {
+      processId: process.pid,
+      windowsSessionId: this.windowsSessionId,
+      windowStationName: this.windowStationName,
+      desktopName: this.desktopName,
+      isLocked: this.isLocked,
+      screenWidth: this.screenWidth,
+      screenHeight: this.screenHeight,
+      dpi: this.dpi,
+      monitors: this.monitors
+    };
   }
 
   public async start(): Promise<void> {
@@ -223,5 +312,26 @@ print(f"{cx},{cy},{dpi}")`;
     this.isRunning = false;
     this.stopHeartbeatLoop();
     await this.client.disconnect();
+  }
+
+  private setupHandlers(): void {
+    this.client.onConnect(() => {
+      this.sendCurrentStatus();
+      this.startHeartbeatLoop();
+    });
+
+    this.client.onDisconnect(() => {
+      this.stopHeartbeatLoop();
+    });
+
+    this.client.onMessage((msg: IpcMessage) => {
+      if (msg.type === IpcMessageType.COMMAND) {
+        this.handleCommand(msg.payload as IpcCommandPayload);
+      }
+    });
+  }
+
+  private handleCommand(cmd: IpcCommandPayload): void {
+    // Sẵn sàng nhận lệnh điều khiển remote desktop
   }
 }

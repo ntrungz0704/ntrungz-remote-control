@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import child_process from 'node:child_process';
+import path from 'node:path';
 import { NamedPipeServer } from '../ipc/pipe-server';
 import { 
   IpcMessage, 
@@ -46,7 +47,7 @@ export class WatchdogService {
     this.maxRestartsPerMinute = options?.maxRestartsPerMinute ?? 5;
     this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? 15_000;
     this.customLauncher = options?.processLauncher;
-    this.agentScriptPath = options?.agentScriptPath;
+    this.agentScriptPath = options?.agentScriptPath || path.resolve(__dirname, '../interactive/entry.ts');
 
     this.pipeServer = new NamedPipeServer({
       pipeName: options?.pipeName,
@@ -54,6 +55,14 @@ export class WatchdogService {
     });
 
     this.setupIpcHandlers();
+  }
+
+  public getAgentProcess(): child_process.ChildProcess | null {
+    return this.agentProcess;
+  }
+
+  public getPipeServer(): NamedPipeServer {
+    return this.pipeServer;
   }
 
   private setupIpcHandlers(): void {
@@ -144,6 +153,10 @@ export class WatchdogService {
     }
 
     if (this.agentProcess) {
+      if (this.agentProcess.pid) {
+        this.pipeServer.setExpectedClientIdentity(this.agentProcess.pid, this.activeWindowsSessionId);
+      }
+
       this.agentProcess.on('exit', (code, signal) => {
         console.warn(`[Watchdog] Agent process exited with code ${code}, signal ${signal}`);
         if (this.state === WatchdogState.SUPERVISING) {

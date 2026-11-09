@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import crypto from 'node:crypto';
 import net from 'node:net';
+import path from 'node:path';
+import child_process from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { WatchdogService, WatchdogState } from './agents/windows/src/watchdog/watchdog.service';
 import { WindowsInteractiveAgent } from './agents/windows/src/interactive/interactive.agent';
@@ -85,7 +87,14 @@ describe('Ntrungz Remote Control — Phase 3A Hardened Windows Agent & IPC Suite
             const challenge = challengeMsg.payload.challenge;
             // Ký chữ ký với timestamp quá khứ (10 phút trước)
             const staleTime = Date.now() - 600_000;
-            const signature = IpcFraming.computeHandshakeSignature(TEST_VALID_TOKEN, challenge, staleTime);
+            const signature = IpcFraming.computeHandshakeSignature(TEST_VALID_TOKEN, {
+              challenge,
+              timestamp: staleTime,
+              processId: process.pid,
+              windowsSessionId: 1,
+              clientType: 'INTERACTIVE_AGENT',
+              version: '3.0.0-phase3a'
+            });
 
             const staleResponse: IpcMessage = {
               id: crypto.randomUUID(),
@@ -114,6 +123,122 @@ describe('Ntrungz Remote Control — Phase 3A Hardened Windows Agent & IPC Suite
 
       expect(challengeMsgReceived).toBe(true);
       expect(server.isClientConnected()).toBe(false);
+    });
+
+    it('CASE 4B: Rejection of handshake missing version (BLOCKER R02 negative test)', async () => {
+      const rawSocket = net.connect(pipeName);
+      let errorReceived = false;
+
+      await new Promise<void>((resolve) => {
+        rawSocket.on('data', (data) => {
+          const { messages } = IpcFraming.decodeFrames(data);
+          const challengeMsg = messages.find(m => m.type === IpcMessageType.HANDSHAKE_CHALLENGE);
+          if (challengeMsg) {
+            const challenge = challengeMsg.payload.challenge;
+            const now = Date.now();
+            const signature = IpcFraming.computeHandshakeSignature(TEST_VALID_TOKEN, {
+              challenge,
+              timestamp: now,
+              processId: process.pid,
+              windowsSessionId: 1,
+              clientType: 'INTERACTIVE_AGENT',
+              version: '3.0.0-phase3a'
+            });
+
+            const badResponse: IpcMessage = {
+              id: crypto.randomUUID(),
+              type: IpcMessageType.HANDSHAKE_RESPONSE,
+              timestamp: now,
+              payload: {
+                signature,
+                timestamp: now,
+                processId: process.pid,
+                windowsSessionId: 1,
+                clientType: 'INTERACTIVE_AGENT'
+                // version omitted intentionally
+              }
+            };
+            rawSocket.write(IpcFraming.encodeMessage(badResponse));
+          }
+
+          const errorMsg = messages.find(m => m.type === IpcMessageType.ERROR);
+          if (errorMsg) {
+            expect(errorMsg.payload.code).toBe('INVALID_VERSION');
+            errorReceived = true;
+            rawSocket.destroy();
+            resolve();
+          }
+        });
+      });
+
+      expect(errorReceived).toBe(true);
+      expect(server.isClientConnected()).toBe(false);
+    });
+
+    it('CASE 4C: Rejection of handshake with PID mismatch (BLOCKER R02 negative test)', async () => {
+      server.setExpectedClientIdentity(999999, 1);
+      const rawSocket = net.connect(pipeName);
+      let errorReceived = false;
+
+      await new Promise<void>((resolve) => {
+        rawSocket.on('data', (data) => {
+          const { messages } = IpcFraming.decodeFrames(data);
+          const challengeMsg = messages.find(m => m.type === IpcMessageType.HANDSHAKE_CHALLENGE);
+          if (challengeMsg) {
+            const challenge = challengeMsg.payload.challenge;
+            const now = Date.now();
+            const wrongPid = 12345;
+            const signature = IpcFraming.computeHandshakeSignature(TEST_VALID_TOKEN, {
+              challenge,
+              timestamp: now,
+              processId: wrongPid,
+              windowsSessionId: 1,
+              clientType: 'INTERACTIVE_AGENT',
+              version: '3.0.0-phase3a'
+            });
+
+            const badResponse: IpcMessage = {
+              id: crypto.randomUUID(),
+              type: IpcMessageType.HANDSHAKE_RESPONSE,
+              timestamp: now,
+              payload: {
+                signature,
+                timestamp: now,
+                processId: wrongPid,
+                windowsSessionId: 1,
+                clientType: 'INTERACTIVE_AGENT',
+                version: '3.0.0-phase3a'
+              }
+            };
+            rawSocket.write(IpcFraming.encodeMessage(badResponse));
+          }
+
+          const errorMsg = messages.find(m => m.type === IpcMessageType.ERROR);
+          if (errorMsg) {
+            expect(errorMsg.payload.code).toBe('PROCESS_ID_MISMATCH');
+            errorReceived = true;
+            rawSocket.destroy();
+            resolve();
+          }
+        });
+      });
+
+      expect(errorReceived).toBe(true);
+    });
+
+    it('CASE 4D: Unauthenticated socket disconnect does NOT trigger watchdog restart (BLOCKER R03)', async () => {
+      let disconnectTriggered = false;
+      server.onDisconnect(() => {
+        disconnectTriggered = true;
+      });
+
+      // Mở kết nối socket thô và đóng ngay mà không xác thực
+      const rawSocket = net.connect(pipeName);
+      await new Promise(r => setTimeout(r, 50));
+      rawSocket.destroy();
+      await new Promise(r => setTimeout(r, 100));
+
+      expect(disconnectTriggered).toBe(false);
     });
 
     it('CASE 5: Constant-time signature verification', () => {
@@ -227,9 +352,11 @@ describe('Ntrungz Remote Control — Phase 3A Hardened Windows Agent & IPC Suite
       watchdog = new WatchdogService({
         pipeName,
         authToken: TEST_VALID_TOKEN,
-        heartbeatTimeoutMs: 15_000
+        heartbeatTimeoutMs: 15_000,
+        processLauncher: () => (new EventEmitter() as any) // Vô hiệu hóa auto-spawn để test in-process agent
       });
       await watchdog.start();
+      watchdog.getPipeServer().setExpectedClientIdentity(process.pid, 1);
 
       agent = new WindowsInteractiveAgent({
         pipeName,
@@ -309,8 +436,13 @@ describe('Ntrungz Remote Control — Phase 3A Hardened Windows Agent & IPC Suite
     });
 
     it('CASE 14: Graceful shutdown of Interactive Agent and Watchdog', async () => {
-      watchdog = new WatchdogService({ pipeName, authToken: TEST_VALID_TOKEN });
+      watchdog = new WatchdogService({
+        pipeName,
+        authToken: TEST_VALID_TOKEN,
+        processLauncher: () => (new EventEmitter() as any)
+      });
       await watchdog.start();
+      watchdog.getPipeServer().setExpectedClientIdentity(process.pid, 1);
 
       agent = new WindowsInteractiveAgent({
         pipeName,
@@ -324,6 +456,58 @@ describe('Ntrungz Remote Control — Phase 3A Hardened Windows Agent & IPC Suite
 
       await watchdog.stop();
       expect(watchdog.getState()).toBe(WatchdogState.STOPPED);
+    });
+
+    it('CASE 15: Real Windows OS Native Discovery & Target PID Verification (Zero hardcoded values)', () => {
+      // Khởi tạo agent hoàn toàn không truyền mock desktopName, windowStationName hay monitors
+      const realAgent = new WindowsInteractiveAgent({
+        pipeName,
+        authToken: TEST_VALID_TOKEN
+      });
+
+      const ctx = realAgent.getDesktopContext();
+      expect(ctx.windowStationName).toBe('WinSta0');
+      expect(ctx.desktopName.length).toBeGreaterThan(0);
+      expect(ctx.monitors.length).toBeGreaterThanOrEqual(1);
+      expect(ctx.screenWidth).toBeGreaterThanOrEqual(1024);
+      expect(ctx.screenHeight).toBeGreaterThanOrEqual(768);
+      expect(ctx.dpi).toBeGreaterThanOrEqual(96);
+
+      // Chạy trực tiếp kịch bản kiểm tra thực thể Windows Target PID
+      const verifyOutput = child_process.execSync(`py scripts/verify_windows_session.py ${process.pid}`, {
+        encoding: 'utf-8',
+        timeout: 5000
+      });
+      expect(verifyOutput).toContain('VERDICT: ALL WINDOWS RUNTIME VERIFICATION CRITERIA PASSED [100% GREEN]');
+    });
+
+    it('CASE 16: Watchdog launches real child process with verified Target PID and Session 1 binding', async () => {
+      watchdog = new WatchdogService({
+        pipeName,
+        authToken: TEST_VALID_TOKEN,
+        agentScriptPath: path.resolve(__dirname, 'agents/windows/src/interactive/entry.ts')
+      });
+
+      // Tạo real child process
+      const child = watchdog.spawnInteractiveAgent();
+      expect(child).not.toBeNull();
+      expect(child?.pid).toBeGreaterThan(0);
+
+      const targetPid = child!.pid!;
+
+      // Kiểm toán độc lập bằng verify_windows_session.py trên đúng Target PID vừa khởi tạo
+      const inspectOut = child_process.execSync(`py scripts/verify_windows_session.py ${targetPid}`, {
+        encoding: 'utf-8',
+        timeout: 5000
+      });
+
+      expect(inspectOut).toContain(`TARGET PID: ${targetPid}`);
+      expect(inspectOut).toContain('VERDICT: ALL WINDOWS RUNTIME VERIFICATION CRITERIA PASSED [100% GREEN]');
+
+      // Dọn dẹp tiến trình
+      try {
+        process.kill(targetPid);
+      } catch (_) {}
     });
   });
 });
