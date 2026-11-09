@@ -22,11 +22,11 @@ export interface InteractiveAgentOptions {
 export class WindowsInteractiveAgent {
   private client: NamedPipeClient;
   private windowsSessionId: number;
-  private desktopName: string;
-  private windowStationName: string;
+  private desktopName: string = 'UNKNOWN';
+  private windowStationName: string = 'UNKNOWN';
   private screenWidth: number = 0;
   private screenHeight: number = 0;
-  private dpi: number = 96;
+  private dpi: number = 0;
   private isLocked: boolean = false;
   private monitors: MonitorInfo[] = [];
   private heartbeatTimer: NodeJS.Timeout | null = null;
@@ -102,83 +102,10 @@ export class WindowsInteractiveAgent {
 
     if (process.platform === 'win32') {
       try {
-        const script = `import ctypes, ctypes.wintypes, json
-u = ctypes.windll.user32
-k = ctypes.windll.kernel32
-
-UOI_NAME = 2
-buf = ctypes.create_unicode_buffer(512)
-needed = ctypes.wintypes.DWORD()
-
-# 1. WindowStation
-hWinSta = u.GetProcessWindowStation()
-winsta = 'Unknown'
-if u.GetUserObjectInformationW(hWinSta, UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
-    winsta = buf.value
-
-# 2. Desktop
-hDesk = u.GetThreadDesktop(k.GetCurrentThreadId())
-desk = 'Unknown'
-if u.GetUserObjectInformationW(hDesk, UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
-    desk = buf.value
-
-# 3. Lock detection via OpenInputDesktop
-hInput = u.OpenInputDesktop(0, False, 0x0001)
-is_locked = False
-if hInput:
-    input_buf = ctypes.create_unicode_buffer(512)
-    if u.GetUserObjectInformationW(hInput, UOI_NAME, input_buf, ctypes.sizeof(input_buf), ctypes.byref(needed)):
-        if 'winlogon' in input_buf.value.lower():
-            is_locked = True
-    u.CloseDesktop(hInput)
-else:
-    is_locked = True
-
-# 4. Multi-monitor enumeration
-class RECT(ctypes.Structure):
-    _fields_ = [('left', ctypes.c_long), ('top', ctypes.c_long), ('right', ctypes.c_long), ('bottom', ctypes.c_long)]
-
-class MONITORINFOEXW(ctypes.Structure):
-    _fields_ = [
-        ('cbSize', ctypes.wintypes.DWORD),
-        ('rcMonitor', RECT),
-        ('rcWork', RECT),
-        ('dwFlags', ctypes.wintypes.DWORD),
-        ('szDevice', ctypes.c_wchar * 32)
-    ]
-
-MonitorEnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HMONITOR, ctypes.wintypes.HDC, ctypes.POINTER(RECT), ctypes.wintypes.LPARAM)
-monitors = []
-def enum_cb(hMon, hdcMon, lprcMon, lParam):
-    info = MONITORINFOEXW()
-    info.cbSize = ctypes.sizeof(MONITORINFOEXW)
-    u.GetMonitorInfoW(hMon, ctypes.byref(info))
-    rc = info.rcMonitor
-    monitors.append({
-        'index': len(monitors),
-        'deviceName': info.szDevice,
-        'isPrimary': bool(info.dwFlags & 1),
-        'width': rc.right - rc.left,
-        'height': rc.bottom - rc.top
-    })
-    return True
-
-u.EnumDisplayMonitors(None, None, MonitorEnumProc(enum_cb), 0)
-
-dpi = u.GetDpiForSystem() if hasattr(u, 'GetDpiForSystem') else 96
-
-print(json.dumps({
-    'windowStation': winsta,
-    'desktop': desk,
-    'isLocked': is_locked,
-    'dpi': dpi,
-    'monitors': monitors
-}))`;
-
-        const out = child_process.execSync(`py -c "${script}"`, { encoding: 'utf-8', timeout: 4000 });
+        const out = child_process.execSync('py scripts/get_desktop_context.py', { encoding: 'utf-8', timeout: 4000 });
         const parsed = JSON.parse(out.trim());
-        this.windowStationName = parsed.windowStation || 'WinSta0';
-        this.desktopName = parsed.desktop || 'Default';
+        this.windowStationName = parsed.windowStation || 'UNKNOWN';
+        this.desktopName = parsed.desktop || 'UNKNOWN';
         this.isLocked = Boolean(parsed.isLocked);
         this.dpi = parsed.dpi || 96;
         this.monitors = (parsed.monitors || []).map((m: any) => ({
@@ -191,8 +118,8 @@ print(json.dumps({
           this.screenWidth = primary.width;
           this.screenHeight = primary.height;
         } else {
-          this.screenWidth = 1920;
-          this.screenHeight = 1080;
+          this.screenWidth = 0;
+          this.screenHeight = 0;
         }
         return;
       } catch (err) {
@@ -200,20 +127,13 @@ print(json.dumps({
       }
     }
 
-    this.windowStationName = 'WinSta0';
-    this.desktopName = 'Default';
+    this.windowStationName = 'UNKNOWN';
+    this.desktopName = 'UNKNOWN';
     this.isLocked = false;
-    this.screenWidth = 1920;
-    this.screenHeight = 1080;
-    this.dpi = 96;
-    this.monitors = [{
-      index: 0,
-      deviceName: '\\\\.\\DISPLAY1',
-      isPrimary: true,
-      width: 1920,
-      height: 1080,
-      dpi: 96
-    }];
+    this.screenWidth = 0;
+    this.screenHeight = 0;
+    this.dpi = 0;
+    this.monitors = [];
   }
 
   /**
@@ -329,9 +249,5 @@ print(json.dumps({
         this.handleCommand(msg.payload as IpcCommandPayload);
       }
     });
-  }
-
-  private handleCommand(cmd: IpcCommandPayload): void {
-    // Sẵn sàng nhận lệnh điều khiển remote desktop
   }
 }

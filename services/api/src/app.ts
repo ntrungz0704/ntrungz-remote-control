@@ -50,11 +50,13 @@ export function buildApp(): AppContext {
       });
     }
 
-    return reply.status(error.statusCode || 500).send({
+    const statusCode = (error as { statusCode?: number }).statusCode || 500;
+    const message = (error as { message?: string }).message || 'An unexpected error occurred';
+    return reply.status(statusCode).send({
       success: false,
       error: {
         code: 'INTERNAL_SERVER_ERROR',
-        message: error.message || 'An unexpected error occurred'
+        message
       }
     });
   });

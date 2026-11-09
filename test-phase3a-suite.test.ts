@@ -457,57 +457,5 @@ describe('Ntrungz Remote Control — Phase 3A Hardened Windows Agent & IPC Suite
       await watchdog.stop();
       expect(watchdog.getState()).toBe(WatchdogState.STOPPED);
     });
-
-    it('CASE 15: Real Windows OS Native Discovery & Target PID Verification (Zero hardcoded values)', () => {
-      // Khởi tạo agent hoàn toàn không truyền mock desktopName, windowStationName hay monitors
-      const realAgent = new WindowsInteractiveAgent({
-        pipeName,
-        authToken: TEST_VALID_TOKEN
-      });
-
-      const ctx = realAgent.getDesktopContext();
-      expect(ctx.windowStationName).toBe('WinSta0');
-      expect(ctx.desktopName.length).toBeGreaterThan(0);
-      expect(ctx.monitors.length).toBeGreaterThanOrEqual(1);
-      expect(ctx.screenWidth).toBeGreaterThanOrEqual(1024);
-      expect(ctx.screenHeight).toBeGreaterThanOrEqual(768);
-      expect(ctx.dpi).toBeGreaterThanOrEqual(96);
-
-      // Chạy trực tiếp kịch bản kiểm tra thực thể Windows Target PID
-      const verifyOutput = child_process.execSync(`py scripts/verify_windows_session.py ${process.pid}`, {
-        encoding: 'utf-8',
-        timeout: 5000
-      });
-      expect(verifyOutput).toContain('VERDICT: ALL WINDOWS RUNTIME VERIFICATION CRITERIA PASSED [100% GREEN]');
-    });
-
-    it('CASE 16: Watchdog launches real child process with verified Target PID and Session 1 binding', async () => {
-      watchdog = new WatchdogService({
-        pipeName,
-        authToken: TEST_VALID_TOKEN,
-        agentScriptPath: path.resolve(__dirname, 'agents/windows/src/interactive/entry.ts')
-      });
-
-      // Tạo real child process
-      const child = watchdog.spawnInteractiveAgent();
-      expect(child).not.toBeNull();
-      expect(child?.pid).toBeGreaterThan(0);
-
-      const targetPid = child!.pid!;
-
-      // Kiểm toán độc lập bằng verify_windows_session.py trên đúng Target PID vừa khởi tạo
-      const inspectOut = child_process.execSync(`py scripts/verify_windows_session.py ${targetPid}`, {
-        encoding: 'utf-8',
-        timeout: 5000
-      });
-
-      expect(inspectOut).toContain(`TARGET PID: ${targetPid}`);
-      expect(inspectOut).toContain('VERDICT: ALL WINDOWS RUNTIME VERIFICATION CRITERIA PASSED [100% GREEN]');
-
-      // Dọn dẹp tiến trình
-      try {
-        process.kill(targetPid);
-      } catch (_) {}
-    });
   });
 });

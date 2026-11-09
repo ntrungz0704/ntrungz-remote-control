@@ -23,7 +23,7 @@ export interface WatchdogOptions {
   heartbeatTimeoutMs?: number;
   maxRestartsPerMinute?: number;
   agentScriptPath?: string;
-  processLauncher?: (env: Record<string, string>) => child_process.ChildProcess;
+  processLauncher?: (env: NodeJS.ProcessEnv) => child_process.ChildProcess;
 }
 
 export class WatchdogService {
@@ -38,7 +38,7 @@ export class WatchdogService {
   private heartbeatTimeoutMs: number;
   private supervisorInterval: NodeJS.Timeout | null = null;
   private agentProcess: child_process.ChildProcess | null = null;
-  private customLauncher?: (env: Record<string, string>) => child_process.ChildProcess;
+  private customLauncher?: (env: NodeJS.ProcessEnv) => child_process.ChildProcess;
   private agentScriptPath?: string;
 
   constructor(options?: WatchdogOptions) {
@@ -136,8 +136,8 @@ export class WatchdogService {
       this.agentProcess = null;
     }
 
-    const secureEnv: Record<string, string> = {
-      ...(process.env as Record<string, string>),
+    const secureEnv: NodeJS.ProcessEnv = {
+      ...process.env,
       NTRUNGZ_IPC_SECRET: this.authToken,
       NTRUNGZ_SESSION_ID: String(this.activeWindowsSessionId)
     };
@@ -145,10 +145,15 @@ export class WatchdogService {
     if (this.customLauncher) {
       this.agentProcess = this.customLauncher(secureEnv);
     } else if (this.agentScriptPath) {
-      this.agentProcess = child_process.spawn(process.execPath, [this.agentScriptPath], {
+      const isTs = this.agentScriptPath.endsWith('.ts');
+      const cmd = isTs ? (process.platform === 'win32' ? 'npx.cmd' : 'npx') : process.execPath;
+      const args = isTs ? ['tsx', this.agentScriptPath] : [this.agentScriptPath];
+
+      this.agentProcess = child_process.spawn(cmd, args, {
         env: secureEnv,
         stdio: 'ignore',
-        detached: true
+        detached: true,
+        shell: isTs
       });
     }
 

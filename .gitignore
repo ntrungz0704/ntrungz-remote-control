@@ -30,3 +30,5 @@ scripts/check_*.py
 scripts/click_*.py
 scripts/open_*.py
 scripts/wait_*.py
+scripts/submit_*.py
+scripts/inspect_*.py
