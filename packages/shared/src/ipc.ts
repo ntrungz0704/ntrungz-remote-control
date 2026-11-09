@@ -58,7 +58,9 @@ export interface IpcStatusPayload {
   targetProcessId: number;
   windowStationName: string;
   desktopName: string;
-  isLocked: boolean;
+  isLocked: boolean | null;
+  lockState?: 'LOCKED' | 'UNLOCKED' | 'UNKNOWN';
+  topologySignature?: string;
   monitors: MonitorInfo[];
   resolution: {
     width: number;

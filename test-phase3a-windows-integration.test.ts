@@ -43,18 +43,36 @@ describe('Ntrungz Remote Control — Phase 3A Real Windows 11 Integration Suite'
     expect(ctx.screenWidth).toBeGreaterThanOrEqual(1024);
     expect(ctx.screenHeight).toBeGreaterThanOrEqual(768);
     expect(ctx.dpi).toBeGreaterThanOrEqual(96);
+    expect(ctx.lockState).toBeDefined();
+    expect(['LOCKED', 'UNLOCKED', 'UNKNOWN']).toContain(ctx.lockState);
   });
 
-  it('INTEG-03: Independent Target Process Desktop Verification via PEB and verify_windows_session.py', async () => {
-    watchdog = new WatchdogService({ pipeName, authToken: TEST_VALID_TOKEN });
+  it('INTEG-03: Watchdog launches real Interactive Agent process directly via node.exe with Genuine PID and Session Verification', async () => {
+    watchdog = new WatchdogService({
+      pipeName,
+      authToken: TEST_VALID_TOKEN,
+      agentScriptPath: path.resolve(__dirname, 'agents/windows/src/interactive/entry.ts')
+    });
     await watchdog.start();
 
-    const verifyOutput = child_process.execSync(`py scripts/verify_windows_session.py ${process.pid} "${pipeName}"`, {
+    const targetPid = watchdog.getAgentPid();
+    expect(targetPid).not.toBeNull();
+    expect(targetPid).toBeGreaterThan(0);
+    // BẮT BUỘC: Target PID phải là tiến trình riêng biệt do Watchdog khởi chạy, KHÔNG PHẢI tiến trình Vitest
+    expect(targetPid).not.toBe(process.pid);
+
+    const launcherScript = path.resolve(__dirname, 'agents/windows/src/watchdog/process_launcher.py');
+    const statusOut = child_process.execSync(`py "${launcherScript}" status ${targetPid}`, { encoding: 'utf-8' });
+    const statusParsed = JSON.parse(statusOut.trim());
+    expect(statusParsed.running).toBe(true);
+
+    // Kiểm định toàn diện runtime bằng scripts/verify_windows_session.py đối với PID của chính Agent
+    const verifyOutput = child_process.execSync(`py scripts/verify_windows_session.py ${targetPid} "${pipeName}"`, {
       encoding: 'utf-8',
-      timeout: 5000
+      timeout: 6000
     });
 
-    expect(verifyOutput).toContain(`TARGET PID: ${process.pid}`);
+    expect(verifyOutput).toContain(`TARGET PID: ${targetPid}`);
     expect(verifyOutput).toContain('[PASS] 1. Active Console Session ID');
     expect(verifyOutput).toContain('[PASS] 2. Target Process Access');
     expect(verifyOutput).toContain('[PASS] 3. ProcessIdToSessionId Match');
@@ -65,7 +83,7 @@ describe('Ntrungz Remote Control — Phase 3A Real Windows 11 Integration Suite'
     expect(verifyOutput).toContain('VERDICT: ALL WINDOWS RUNTIME VERIFICATION CRITERIA PASSED [100% GREEN]');
   });
 
-  it('INTEG-04: Watchdog launches real child process (entry.ts) with genuine PID in Session 1', async () => {
+  it('INTEG-04: End-to-End Process Lifecycle: Real PID Supervision, Telemetry, and Termination on Watchdog Stop', async () => {
     watchdog = new WatchdogService({
       pipeName,
       authToken: TEST_VALID_TOKEN,
@@ -73,29 +91,25 @@ describe('Ntrungz Remote Control — Phase 3A Real Windows 11 Integration Suite'
     });
     await watchdog.start();
 
-    const child = watchdog.getAgentProcess();
-    expect(child).not.toBeNull();
-    expect(child?.pid).toBeGreaterThan(0);
+    const targetPid = watchdog.getAgentPid()!;
+    expect(targetPid).toBeGreaterThan(0);
 
-    const targetPid = child!.pid!;
+    // Đợi kết nối IPC và bắt tay thành công (trong tối đa 5 giây)
+    const startTime = Date.now();
+    while (!watchdog.isAgentConnected() && Date.now() - startTime < 5000) {
+      await new Promise(r => setTimeout(r, 100));
+    }
 
-    const inspectOut = child_process.execSync(`py scripts/verify_windows_session.py ${targetPid} "${pipeName}"`, {
-      encoding: 'utf-8',
-      timeout: 5000
-    });
+    expect(watchdog.isAgentConnected()).toBe(true);
 
-    expect(inspectOut).toContain(`TARGET PID: ${targetPid}`);
-    expect(inspectOut).toContain('[PASS] 1. Active Console Session ID');
-    expect(inspectOut).toContain('[PASS] 2. Target Process Access');
-    expect(inspectOut).toContain('[PASS] 3. ProcessIdToSessionId Match');
-    expect(inspectOut).toContain('[PASS] 4. Token Session ID Match');
-    expect(inspectOut).toContain('[PASS] 5. Target PEB DesktopInfo');
-    expect(inspectOut).toContain('[PASS] 6. Named Pipe Explicit DACL');
-    expect(inspectOut).toContain('[PASS] 7. Multi-Monitor Display State');
-    expect(inspectOut).toContain('VERDICT: ALL WINDOWS RUNTIME VERIFICATION CRITERIA PASSED [100% GREEN]');
+    // Dừng Watchdog và kiểm chứng tiến trình con thực tế đã được giải phóng
+    await watchdog.stop();
+    expect(watchdog.getState()).toBe(WatchdogState.STOPPED);
 
-    try {
-      process.kill(targetPid);
-    } catch (_) {}
+    // Kiểm chứng tiến trình targetPid đã dừng thực sự bằng Win32 GetExitCodeProcess
+    const launcherScript = path.resolve(__dirname, 'agents/windows/src/watchdog/process_launcher.py');
+    const checkOut = child_process.execSync(`py "${launcherScript}" status ${targetPid}`, { encoding: 'utf-8' });
+    const checkParsed = JSON.parse(checkOut.trim());
+    expect(checkParsed.running).toBe(false);
   });
 });

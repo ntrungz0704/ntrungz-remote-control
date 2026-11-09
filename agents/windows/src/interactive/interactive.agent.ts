@@ -15,6 +15,7 @@ export interface InteractiveAgentOptions {
   windowsSessionId?: number;
   desktopName?: string;
   windowStationName?: string;
+  isLocked?: boolean | null;
   screenWidth?: number;
   screenHeight?: number;
   dpi?: number;
@@ -28,7 +29,10 @@ export class WindowsInteractiveAgent {
   private screenWidth: number = 0;
   private screenHeight: number = 0;
   private dpi: number = 0;
-  private isLocked: boolean = false;
+  // BLOCKER R05: Không mặc định false, hỗ trợ trạng thái boolean | null và lockState
+  private isLocked: boolean | null = null;
+  private lockState: 'LOCKED' | 'UNLOCKED' | 'UNKNOWN' = 'UNKNOWN';
+  private topologySignature: string | null = null;
   private monitors: MonitorInfo[] = [];
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private isRunning = false;
@@ -91,7 +95,9 @@ export class WindowsInteractiveAgent {
       this.screenWidth = options.screenWidth;
       this.screenHeight = options.screenHeight || 1080;
       this.dpi = options.dpi ?? 0;
-      this.isLocked = false;
+      // BLOCKER R05: Hỗ trợ boolean | null, không tự gán false
+      this.isLocked = options.isLocked ?? null;
+      this.lockState = options.isLocked === true ? 'LOCKED' : (options.isLocked === false ? 'UNLOCKED' : 'UNKNOWN');
       this.monitors = [{
         index: 0,
         deviceName: '\\\\.\\DISPLAY1',
@@ -110,7 +116,10 @@ export class WindowsInteractiveAgent {
         const parsed = JSON.parse(out.trim());
         this.windowStationName = parsed.windowStation || 'UNKNOWN';
         this.desktopName = parsed.desktop || 'UNKNOWN';
-        this.isLocked = parsed.isLocked === true;
+        // BLOCKER R05: Đọc chính xác lockState và isLocked từ OS, không bao giờ ép về false
+        this.isLocked = typeof parsed.isLocked === 'boolean' ? parsed.isLocked : null;
+        this.lockState = parsed.lockState || (this.isLocked === true ? 'LOCKED' : (this.isLocked === false ? 'UNLOCKED' : 'UNKNOWN'));
+        this.topologySignature = parsed.topologySignature || null;
         this.dpi = typeof parsed.systemDpi === 'number' ? parsed.systemDpi : 0;
         this.monitors = (parsed.monitors || []).map((m: any) => ({
           index: m.index,
@@ -137,7 +146,9 @@ export class WindowsInteractiveAgent {
 
     this.windowStationName = 'UNKNOWN';
     this.desktopName = 'UNKNOWN';
-    this.isLocked = false;
+    this.isLocked = null;
+    this.lockState = 'UNKNOWN';
+    this.topologySignature = null;
     this.screenWidth = 0;
     this.screenHeight = 0;
     this.dpi = 0;
@@ -167,7 +178,9 @@ export class WindowsInteractiveAgent {
     windowsSessionId: number;
     windowStationName: string;
     desktopName: string;
-    isLocked: boolean;
+    isLocked: boolean | null;
+    lockState: 'LOCKED' | 'UNLOCKED' | 'UNKNOWN';
+    topologySignature: string | null;
     screenWidth: number;
     screenHeight: number;
     dpi: number;
@@ -179,6 +192,8 @@ export class WindowsInteractiveAgent {
       windowStationName: this.windowStationName,
       desktopName: this.desktopName,
       isLocked: this.isLocked,
+      lockState: this.lockState,
+      topologySignature: this.topologySignature,
       screenWidth: this.screenWidth,
       screenHeight: this.screenHeight,
       dpi: this.dpi,
@@ -199,6 +214,8 @@ export class WindowsInteractiveAgent {
       windowStationName: this.windowStationName,
       desktopName: this.desktopName,
       isLocked: this.isLocked,
+      lockState: this.lockState,
+      topologySignature: this.topologySignature ?? undefined,
       monitors: this.monitors,
       resolution: {
         width: this.screenWidth,

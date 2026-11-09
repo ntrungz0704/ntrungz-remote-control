@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import child_process from 'node:child_process';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { EventEmitter } from 'node:events';
 import { NamedPipeServer } from '../ipc/pipe-server';
 import { 
   IpcMessage, 
@@ -26,6 +28,57 @@ export interface WatchdogOptions {
   processLauncher?: (env: NodeJS.ProcessEnv) => child_process.ChildProcess;
 }
 
+export class RealAgentProcess extends EventEmitter {
+  public pid: number;
+  public killed = false;
+  private monitorTimer: NodeJS.Timeout | null = null;
+  private launcherScript: string;
+
+  constructor(pid: number, launcherScript: string) {
+    super();
+    this.pid = pid;
+    this.launcherScript = launcherScript;
+
+    // BLOCKER R01: Quản lý vòng đời tiến trình thực tế bằng non-blocking kernel signal probe
+    this.monitorTimer = setInterval(() => {
+      try {
+        process.kill(this.pid, 0);
+      } catch (err: any) {
+        if (err.code === 'ESRCH') {
+          this.cleanup();
+          this.emit('exit', 0, null);
+        }
+      }
+    }, 1000);
+  }
+
+  public kill(): boolean {
+    this.killed = true;
+    this.cleanup();
+    try {
+      child_process.execSync(
+        `py "${this.launcherScript}" kill ${this.pid}`,
+        { encoding: 'utf-8', timeout: 3000 }
+      );
+      return true;
+    } catch (_) {
+      try {
+        process.kill(this.pid);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+  }
+
+  private cleanup(): void {
+    if (this.monitorTimer) {
+      clearInterval(this.monitorTimer);
+      this.monitorTimer = null;
+    }
+  }
+}
+
 export class WatchdogService {
   private state: WatchdogState = WatchdogState.STOPPED;
   private pipeServer: NamedPipeServer;
@@ -37,7 +90,7 @@ export class WatchdogService {
   private maxRestartsPerMinute: number;
   private heartbeatTimeoutMs: number;
   private supervisorInterval: NodeJS.Timeout | null = null;
-  private agentProcess: child_process.ChildProcess | null = null;
+  private agentProcess: RealAgentProcess | child_process.ChildProcess | null = null;
   private customLauncher?: (env: NodeJS.ProcessEnv) => child_process.ChildProcess;
   private agentScriptPath?: string;
   private pipeName: string;
@@ -57,10 +110,6 @@ export class WatchdogService {
     });
 
     this.setupIpcHandlers();
-  }
-
-  public getAgentProcess(): child_process.ChildProcess | null {
-    return this.agentProcess;
   }
 
   public getPipeServer(): NamedPipeServer {
@@ -138,7 +187,7 @@ export class WatchdogService {
   /**
    * Khởi động Interactive Session Agent với cơ chế bootstrap bí mật và xác minh quyền tương tác (Fail-Closed)
    */
-  public spawnInteractiveAgent(): child_process.ChildProcess | null {
+  public spawnInteractiveAgent(): RealAgentProcess | child_process.ChildProcess | null {
     // Duplicate process prevention: Đóng tiến trình cũ nếu còn tồn tại
     if (this.agentProcess && !this.agentProcess.killed) {
       try {
@@ -163,11 +212,19 @@ export class WatchdogService {
     } else if (this.agentScriptPath && process.platform === 'win32') {
       const launcherScript = path.resolve(__dirname, 'process_launcher.py');
       const isTs = this.agentScriptPath.endsWith('.ts');
+      const tsxLoaderUrl = pathToFileURL(require.resolve('tsx')).href;
+      // BLOCKER R01: Khởi chạy trực tiếp node.exe, cấm tuyệt đối npx.cmd hay cmd.exe
       const cmd = isTs
-        ? `npx.cmd tsx "${this.agentScriptPath}"`
+        ? `"${process.execPath}" --import "${tsxLoaderUrl}" "${this.agentScriptPath}"`
         : `"${process.execPath}" "${this.agentScriptPath}"`;
 
+      const b64Cmd = Buffer.from(cmd).toString('base64');
       const b64Env = Buffer.from(JSON.stringify({
+        SystemRoot: process.env.SystemRoot || 'C:\\WINDOWS',
+        PATH: process.env.PATH || '',
+        SystemDrive: process.env.SystemDrive || 'C:',
+        TEMP: process.env.TEMP || 'C:\\Windows\\Temp',
+        TMP: process.env.TMP || 'C:\\Windows\\Temp',
         NTRUNGZ_IPC_SECRET: this.authToken,
         NTRUNGZ_SESSION_ID: String(this.activeWindowsSessionId),
         NTRUNGZ_PIPE_NAME: this.pipeName
@@ -175,7 +232,7 @@ export class WatchdogService {
 
       try {
         const out = child_process.execSync(
-          `py "${launcherScript}" ${this.activeWindowsSessionId} "${cmd}" ${b64Env}`,
+          `py "${launcherScript}" ${this.activeWindowsSessionId} ${b64Cmd} ${b64Env}`,
           { encoding: 'utf-8', timeout: 8000 }
         );
         const jsonLine = out.split('\n').map(l => l.trim()).find(l => l.startsWith('{') && l.endsWith('}'));
@@ -185,8 +242,8 @@ export class WatchdogService {
         const parsed = JSON.parse(jsonLine);
         if (parsed.status === 'SUCCESS' && parsed.pid) {
           this.pipeServer.setExpectedClientIdentity(parsed.pid, this.activeWindowsSessionId);
-          this.agentProcess = child_process.spawn('cmd.exe', ['/c'], { stdio: 'ignore' });
-          Object.defineProperty(this.agentProcess, 'pid', { value: parsed.pid });
+          // BLOCKER R01: Quản lý trực tiếp Real PID bằng RealAgentProcess, không dùng wrapper cmd.exe
+          this.agentProcess = new RealAgentProcess(parsed.pid, launcherScript);
         } else {
           console.error('[Watchdog] Native process launcher returned failure:', parsed);
           this.agentProcess = null;
@@ -197,8 +254,9 @@ export class WatchdogService {
       }
     } else if (this.agentScriptPath) {
       const isTs = this.agentScriptPath.endsWith('.ts');
-      const cmd = isTs ? 'npx' : process.execPath;
-      const args = isTs ? ['tsx', this.agentScriptPath] : [this.agentScriptPath];
+      const tsxLoaderUrl = pathToFileURL(require.resolve('tsx')).href;
+      const cmd = process.execPath;
+      const args = isTs ? ['--import', tsxLoaderUrl, this.agentScriptPath] : [this.agentScriptPath];
 
       this.agentProcess = child_process.spawn(cmd, args, {
         env: secureEnv,
@@ -210,7 +268,7 @@ export class WatchdogService {
     if (this.agentProcess && this.agentProcess.pid) {
       this.pipeServer.setExpectedClientIdentity(this.agentProcess.pid, this.activeWindowsSessionId);
 
-      this.agentProcess.on('exit', (code, signal) => {
+      (this.agentProcess as any).on('exit', (code: any, signal: any) => {
         console.warn(`[Watchdog] Agent process exited with code ${code}, signal ${signal}`);
         if (this.state === WatchdogState.SUPERVISING) {
           this.handleAgentCrashOrExit();
@@ -292,6 +350,14 @@ export class WatchdogService {
   public getRestartCountInWindow(): number {
     const now = Date.now();
     return this.restartTimestamps.filter(t => now - t <= 60_000).length;
+  }
+
+  public getAgentProcess(): RealAgentProcess | child_process.ChildProcess | null {
+    return this.agentProcess;
+  }
+
+  public getAgentPid(): number | null {
+    return this.agentProcess?.pid ?? null;
   }
 
   public async stop(): Promise<void> {

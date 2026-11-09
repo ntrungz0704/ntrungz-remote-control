@@ -88,49 +88,67 @@ if hProcess:
 
     # 5. Architecture-Aware Target PEB DesktopInfo Inspection
     target_desktop_info = "UNKNOWN"
-    try:
-        is_wow64 = ctypes.c_bool(False)
-        kernel32.IsWow64Process(hProcess, ctypes.byref(is_wow64))
+    is_wow64 = ctypes.c_bool(False)
+    wow64_ok = kernel32.IsWow64Process(hProcess, ctypes.byref(is_wow64))
 
-        pbi = PROCESS_BASIC_INFORMATION()
-        ret_len = ctypes.wintypes.ULONG()
-        status = ntdll.NtQueryInformationProcess(hProcess, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), ctypes.byref(ret_len))
-
-        if status == 0 and pbi.PebBaseAddress:
-            params_ptr = ctypes.c_void_p()
-            read_bytes = ctypes.c_size_t()
-            # 64-bit PEB: ProcessParameters offset is 0x20
-            # WOW64 PEB: ProcessParameters offset is 0x10
-            peb_offset = 0x10 if is_wow64.value else 0x20
-            ptr_size = 4 if is_wow64.value else 8
-
-            if kernel32.ReadProcessMemory(hProcess, ctypes.c_void_p(pbi.PebBaseAddress + peb_offset), ctypes.byref(params_ptr), ptr_size, ctypes.byref(read_bytes)):
-                # Read RTL_USER_PROCESS_PARAMETERS
-                buf = (ctypes.c_ubyte * 512)()
-                if kernel32.ReadProcessMemory(hProcess, params_ptr, buf, 512, ctypes.byref(read_bytes)):
-                    # DesktopInfo UNICODE_STRING
-                    # x64: offset 0xC0 (Length 2 bytes at 0xC0, Buffer 8 bytes at 0xC8)
-                    # x86: offset 0x70 (Length 2 bytes at 0x70, Buffer 4 bytes at 0x74)
-                    len_off = 0x70 if is_wow64.value else 0xC0
-                    ptr_off = 0x74 if is_wow64.value else 0xC8
-                    length = int.from_bytes(bytes(buf[len_off:len_off+2]), 'little')
-                    buf_ptr = int.from_bytes(bytes(buf[ptr_off:ptr_off+ptr_size]), 'little')
-
-                    if buf_ptr and length > 0 and length < 512:
-                        desk_buf = ctypes.create_unicode_buffer(length // 2 + 1)
-                        if kernel32.ReadProcessMemory(hProcess, ctypes.c_void_p(buf_ptr), desk_buf, length, ctypes.byref(read_bytes)):
-                            if read_bytes.value == length:
-                                target_desktop_info = desk_buf.value
-    except Exception as e:
-        target_desktop_info = f"ERROR: {e}"
-
-    if target_desktop_info and target_desktop_info != "UNKNOWN" and not target_desktop_info.startswith("ERROR"):
-        desk_lower = target_desktop_info.lower()
-        is_interactive = ("default" in desk_lower or "winsta0" in desk_lower or "exebox" in desk_lower)
-        status = "PASS" if is_interactive else "FAIL"
-        results.append(("5. Target PEB DesktopInfo", f"PEB Desktop string: '{target_desktop_info}' (arch: {'WOW64' if is_wow64.value else 'x64'})", status))
+    if not wow64_ok:
+        results.append(("5. Target PEB DesktopInfo", f"IsWow64Process failed on target PID {target_pid} (LastError={kernel32.GetLastError()})", "FAIL"))
     else:
-        results.append(("5. Target PEB DesktopInfo", f"Cannot verify target desktop (Status: {target_desktop_info})", "FAIL"))
+        try:
+            peb_base = None
+            peb_offset = 0x20
+            ptr_size = 8
+            len_off = 0xC0
+            ptr_off = 0xC8
+
+            if is_wow64.value:
+                # Target is 32-bit WOW64 process: query ProcessWow64Information (class 26) to get 32-bit PEB
+                wow64_peb = ctypes.c_void_p()
+                ret_len = ctypes.wintypes.ULONG()
+                st = ntdll.NtQueryInformationProcess(hProcess, 26, ctypes.byref(wow64_peb), ctypes.sizeof(wow64_peb), ctypes.byref(ret_len))
+                if st == 0 and wow64_peb.value:
+                    peb_base = wow64_peb.value
+                    peb_offset = 0x10
+                    ptr_size = 4
+                    len_off = 0x70
+                    ptr_off = 0x74
+                else:
+                    target_desktop_info = f"NtQueryInformationProcess(ProcessWow64Information) failed: status={st}"
+            else:
+                # Target is native 64-bit process: query ProcessBasicInformation (class 0)
+                pbi = PROCESS_BASIC_INFORMATION()
+                ret_len = ctypes.wintypes.ULONG()
+                st = ntdll.NtQueryInformationProcess(hProcess, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), ctypes.byref(ret_len))
+                if st == 0 and pbi.PebBaseAddress:
+                    peb_base = pbi.PebBaseAddress
+
+            if peb_base:
+                params_ptr = ctypes.c_void_p()
+                read_bytes = ctypes.c_size_t()
+                if kernel32.ReadProcessMemory(hProcess, ctypes.c_void_p(peb_base + peb_offset), ctypes.byref(params_ptr), ptr_size, ctypes.byref(read_bytes)):
+                    buf = (ctypes.c_ubyte * 512)()
+                    if kernel32.ReadProcessMemory(hProcess, params_ptr, buf, 512, ctypes.byref(read_bytes)):
+                        length = int.from_bytes(bytes(buf[len_off:len_off+2]), 'little')
+                        buf_ptr = int.from_bytes(bytes(buf[ptr_off:ptr_off+ptr_size]), 'little')
+
+                        if buf_ptr and 0 < length < 512:
+                            desk_buf = ctypes.create_unicode_buffer(length // 2 + 1)
+                            if kernel32.ReadProcessMemory(hProcess, ctypes.c_void_p(buf_ptr), desk_buf, length, ctypes.byref(read_bytes)):
+                                if read_bytes.value == length:
+                                    target_desktop_info = desk_buf.value
+            else:
+                if not target_desktop_info.startswith("NtQuery"):
+                    target_desktop_info = "Unable to locate PEB base address"
+        except Exception as e:
+            target_desktop_info = f"ERROR: {e}"
+
+        if target_desktop_info and target_desktop_info != "UNKNOWN" and not target_desktop_info.startswith("ERROR") and not target_desktop_info.startswith("NtQuery"):
+            desk_lower = target_desktop_info.lower()
+            is_interactive = ("default" in desk_lower or "winsta0" in desk_lower or "exebox" in desk_lower)
+            status = "PASS" if is_interactive else "FAIL"
+            results.append(("5. Target PEB DesktopInfo", f"PEB Desktop string: '{target_desktop_info}' (arch: {'WOW64' if is_wow64.value else 'x64'})", status))
+        else:
+            results.append(("5. Target PEB DesktopInfo", f"Cannot verify target desktop (Status: {target_desktop_info})", "FAIL"))
 
     kernel32.CloseHandle(hProcess)
 else:
@@ -147,7 +165,10 @@ try:
     dacl = sd.GetSecurityDescriptorDacl()
     ace_count = dacl.GetAceCount() if dacl else 0
 
-    if ace_count >= 3:
+    control, revision = sd.GetSecurityDescriptorControl()
+    is_protected = bool(control & win32security.SE_DACL_PROTECTED)
+
+    if ace_count >= 3 and is_protected:
         aces_info = []
         sids = set()
         for i in range(ace_count):
@@ -158,12 +179,15 @@ try:
 
         has_system = 'S-1-5-18' in sids
         has_admins = 'S-1-5-32-544' in sids
-        if has_system and has_admins:
+        has_user = (user_sid_str in sids) if user_sid_str else True
+        has_unauthorized = any(s in sids for s in ('S-1-1-0', 'S-1-5-7', 'S-1-5-4'))
+
+        if has_system and has_admins and has_user and not has_unauthorized:
             results.append(("6. Named Pipe Explicit DACL", f"Verified Protected DACL: {ace_count} explicit ACEs [{', '.join(aces_info)}]", "PASS"))
         else:
-            results.append(("6. Named Pipe Explicit DACL", f"DACL missing required SYSTEM or Admin ACEs: {sids}", "FAIL"))
+            results.append(("6. Named Pipe Explicit DACL", f"DACL missing required SIDs or contains broad access: {sids}", "FAIL"))
     else:
-        results.append(("6. Named Pipe Explicit DACL", f"DACL has insufficient ACE count ({ace_count})", "FAIL"))
+        results.append(("6. Named Pipe Explicit DACL", f"DACL is not protected (control=0x{control:X}) or insufficient ACE count ({ace_count})", "FAIL"))
 except Exception as e:
     results.append(("6. Named Pipe Explicit DACL", f"Named Pipe verification failed: {e}", "FAIL"))
 

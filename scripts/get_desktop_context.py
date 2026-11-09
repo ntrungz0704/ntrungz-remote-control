@@ -3,6 +3,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 import ctypes
 import ctypes.wintypes
 import json
+import hashlib
 
 u = ctypes.windll.user32
 k = ctypes.windll.kernel32
@@ -24,32 +25,35 @@ desk = "UNKNOWN"
 if hDesk and u.GetUserObjectInformationW(hDesk, UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
     desk = buf.value
 
-# 3. Lock detection via OpenInputDesktop with access denial discrimination
+# 3. Lock detection via OpenInputDesktop (BLOCKER R05: Fail-Closed, no assumptions)
 is_locked = None
+lock_state = "UNKNOWN"
 lock_reason = "UNKNOWN"
 hInput = u.OpenInputDesktop(0, False, 0x0001) # DESKTOP_READOBJECTS
+
 if hInput:
     input_buf = ctypes.create_unicode_buffer(512)
     if u.GetUserObjectInformationW(hInput, UOI_NAME, input_buf, ctypes.sizeof(input_buf), ctypes.byref(needed)):
         inp_name = input_buf.value.lower()
         if "winlogon" in inp_name or "screensaver" in inp_name:
             is_locked = True
+            lock_state = "LOCKED"
             lock_reason = f"INPUT_DESKTOP_{input_buf.value.upper()}"
         elif "default" in inp_name:
             is_locked = False
+            lock_state = "UNLOCKED"
             lock_reason = "INPUT_DESKTOP_DEFAULT_ACTIVE"
         else:
-            is_locked = False
-            lock_reason = f"INPUT_DESKTOP_{input_buf.value.upper()}"
+            is_locked = None
+            lock_state = "UNKNOWN"
+            lock_reason = f"INPUT_DESKTOP_OTHER_{input_buf.value.upper()}"
     u.CloseDesktop(hInput)
 else:
     err = k.GetLastError()
-    if err == 5: # ERROR_ACCESS_DENIED: input desktop is secure (Winlogon / UAC / Lock Screen)
-        is_locked = True
-        lock_reason = "SECURE_DESKTOP_ACCESS_DENIED_LOCKED"
-    else:
-        is_locked = None
-        lock_reason = f"OPEN_INPUT_DESKTOP_FAILED_ERR_{err}"
+    # BLOCKER R05: ERROR_ACCESS_DENIED (5) can be UAC or secure desktop, never assume locked without conclusive evidence
+    is_locked = None
+    lock_state = "UNKNOWN"
+    lock_reason = f"OPEN_INPUT_DESKTOP_DENIED_OR_FAILED_ERR_{err}"
 
 # 4. Per-Monitor Enumeration and Native Shcore Per-Monitor DPI
 class RECT(ctypes.Structure):
@@ -98,13 +102,36 @@ def enum_cb(hMon, hdcMon, lprcMon, lParam):
 
 u.EnumDisplayMonitors(None, None, MonitorEnumProc(enum_cb), 0)
 
-sys_dpi = u.GetDpiForSystem() if hasattr(u, 'GetDpiForSystem') else None
+# Virtual screen metrics
+cx_virtual = u.GetSystemMetrics(78)
+cy_virtual = u.GetSystemMetrics(79)
 
-print(json.dumps({
+# BLOCKER R05: Compute dynamic topology signature to detect display topology / DPI changes
+monitors_json = json.dumps(monitors, sort_keys=True)
+topology_sig = hashlib.sha256(monitors_json.encode('utf-8')).hexdigest()[:16]
+
+# Primary display DPI
+primary_dpi = None
+for m in monitors:
+    if m.get('isPrimary') and m.get('dpi'):
+        primary_dpi = m['dpi']
+        break
+if not primary_dpi and monitors and monitors[0].get('dpi'):
+    primary_dpi = monitors[0]['dpi']
+
+out = {
     'windowStation': winsta,
     'desktop': desk,
     'isLocked': is_locked,
+    'lockState': lock_state,
     'lockReason': lock_reason,
-    'systemDpi': sys_dpi,
-    'monitors': monitors
-}))
+    'monitors': monitors,
+    'systemDpi': primary_dpi or 96,
+    'topologySignature': topology_sig,
+    'virtualScreen': {
+        'width': cx_virtual,
+        'height': cy_virtual
+    }
+}
+
+print(json.dumps(out))
