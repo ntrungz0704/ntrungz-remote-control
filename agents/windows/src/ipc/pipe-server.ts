@@ -1,6 +1,7 @@
 import net from 'node:net';
 import crypto from 'node:crypto';
 import child_process from 'node:child_process';
+import path from 'node:path';
 import { 
   IpcMessage, 
   IpcMessageType, 
@@ -64,20 +65,31 @@ export class NamedPipeServer {
     return this.authenticatedIdentity;
   }
 
+  public getPipeName(): string {
+    return this.pipeName;
+  }
+
   /**
-   * Thiết lập Windows Security Descriptor (DACL) tường minh cho Named Pipe
-   * Cấm hoàn toàn truy cập từ Network và tài khoản không xác thực
+   * Thiết lập và xác minh Windows Security Descriptor (DACL) tường minh cho Named Pipe
+   * Cấm hoàn toàn truy cập từ Network, Anonymous, Everyone và các tài khoản người dùng khác.
+   * Chỉ cấp quyền cho: SYSTEM, Administrators, và User SID đích.
+   * Nếu việc cấp quyền hoặc kiểm chứng DACL thất bại, SERVER SẼ TỰ ĐỘNG HỦY KHỞI ĐỘNG (Fail-Closed).
    */
-  private applyPipeAcl(): void {
+  private applyAndVerifyPipeAcl(): void {
     if (process.platform === 'win32') {
+      const scriptPath = path.resolve(__dirname, '../../../../scripts/secure_pipe_acl.py');
       try {
-        const sddl = 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)';
-        child_process.execSync(
-          `py -c "import win32security; sd = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor('${sddl}', win32security.SDDL_REVISION_1); win32security.SetNamedSecurityInfo('${this.pipeName}', win32security.SE_KERNEL_OBJECT, win32security.DACL_SECURITY_INFORMATION, None, None, sd.GetSecurityDescriptorDacl(), None)"`,
-          { timeout: 3000, stdio: 'ignore' }
+        const out = child_process.execSync(
+          `py "${scriptPath}" "${this.pipeName}"`,
+          { encoding: 'utf-8', timeout: 5000 }
         );
-      } catch (_) {
-        // Môi trường không có quyền admin hoặc file đã có ACL bảo vệ
+        const res = JSON.parse(out.trim());
+        if (res.status !== 'SUCCESS') {
+          throw new Error(`Pipe ACL application error: ${res.error || 'Unknown error'}`);
+        }
+        console.log(`[NamedPipeServer] Pipe DACL verified with ${res.aceCount} explicit ACEs for user SID: ${res.userSid}`);
+      } catch (err: any) {
+        throw new Error(`Failed to apply and verify Named Pipe DACL: ${err.message || err}`);
       }
     }
   }
@@ -85,27 +97,43 @@ export class NamedPipeServer {
   public start(): Promise<void> {
     return new Promise((resolve, reject) => {
       this.server = net.createServer((socket) => {
-        // Chỉ chấp nhận 1 interactive agent kết nối tại một thời điểm
+        // BLOCKER R03: Không cho phép socket chưa xác thực chiếm dụng đường ống chặn client hợp lệ
         if (this.activeSocket && !this.activeSocket.destroyed) {
-          socket.destroy();
-          return;
+          if (!this.isAuthenticated) {
+            console.warn('[NamedPipeServer] Evicting unauthenticated lingering connection for incoming client');
+            this.activeSocket.destroy();
+            this.activeSocket = null;
+          } else {
+            // Đã có phiên hợp lệ đang hoạt động -> từ chối kết nối phụ
+            socket.destroy();
+            return;
+          }
         }
 
         this.activeSocket = socket;
         this.isAuthenticated = false;
         this.authenticatedIdentity = null;
-        this.buffer = Buffer.alloc(0);
 
-        // Sinh challenge ngẫu nhiên để chống tấn công replay / stale
-        this.currentChallenge = crypto.randomBytes(32).toString('hex');
-        this.challengeIssuedAt = Date.now();
+        let socketBuffer: any = Buffer.alloc(0);
+        const socketChallenge = crypto.randomBytes(32).toString('hex');
+        const challengeIssuedAt = Date.now();
+        (socket as any).challenge = socketChallenge;
+        (socket as any).challengeIssuedAt = challengeIssuedAt;
+
+        // Đặt timeout 5 giây cho handshake: nếu không hoàn tất xác thực thì ngắt kết nối
+        const handshakeTimeout = setTimeout(() => {
+          if (!this.isAuthenticated && this.activeSocket === socket) {
+            console.warn('[NamedPipeServer] Handshake timed out for unauthenticated client. Closing socket.');
+            socket.destroy();
+          }
+        }, 5000);
 
         const challengeMsg: IpcMessage<IpcChallengePayload> = {
           id: crypto.randomUUID(),
           type: IpcMessageType.HANDSHAKE_CHALLENGE,
-          timestamp: this.challengeIssuedAt,
+          timestamp: challengeIssuedAt,
           payload: {
-            challenge: this.currentChallenge,
+            challenge: socketChallenge,
             serverProcessId: process.pid,
             serverSessionId: 0
           }
@@ -115,27 +143,30 @@ export class NamedPipeServer {
         socket.write(frame);
 
         socket.on('data', (chunk) => {
-          this.buffer = Buffer.concat([this.buffer, chunk]);
-          const { messages, remainingBuffer, oversizedError, malformedError } = IpcFraming.decodeFrames(this.buffer);
-          this.buffer = remainingBuffer;
+          socketBuffer = Buffer.concat([socketBuffer, chunk]);
+          const { messages, remainingBuffer, oversizedError, malformedError } = IpcFraming.decodeFrames(socketBuffer);
+          socketBuffer = remainingBuffer;
 
           if (oversizedError) {
             console.error('[NamedPipeServer] Oversized frame detected, closing connection');
+            clearTimeout(handshakeTimeout);
             socket.destroy();
             return;
           }
 
           for (const msg of messages) {
-            this.handleIncomingMessage(msg, socket);
+            this.handleIncomingMessage(msg, socket, handshakeTimeout);
           }
         });
 
         socket.on('close', () => {
+          clearTimeout(handshakeTimeout);
           const wasAuthenticated = this.isAuthenticated;
-          this.activeSocket = null;
-          this.isAuthenticated = false;
-          this.authenticatedIdentity = null;
-          this.currentChallenge = null;
+          if (this.activeSocket === socket) {
+            this.activeSocket = null;
+            this.isAuthenticated = false;
+            this.authenticatedIdentity = null;
+          }
 
           // BLOCKER R03: Chỉ kích hoạt sự kiện ngắt kết nối khi client đó ĐÃ xác thực thành công.
           // Các kết nối không xác thực bị đóng TUYỆT ĐỐI KHÔNG làm Watchdog restart tiến trình.
@@ -147,7 +178,7 @@ export class NamedPipeServer {
         });
 
         socket.on('error', (err) => {
-          // Socket error gracefully handled
+          clearTimeout(handshakeTimeout);
         });
       });
 
@@ -156,13 +187,20 @@ export class NamedPipeServer {
       });
 
       this.server.listen(this.pipeName, () => {
-        this.applyPipeAcl();
-        resolve();
+        try {
+          this.applyAndVerifyPipeAcl();
+          resolve();
+        } catch (err) {
+          if (this.server) {
+            this.server.close();
+          }
+          reject(err);
+        }
       });
     });
   }
 
-  private handleIncomingMessage(msg: IpcMessage, socket: net.Socket): void {
+  private handleIncomingMessage(msg: IpcMessage, socket: net.Socket, handshakeTimeout?: NodeJS.Timeout): void {
     if (!this.isAuthenticated) {
       // BLOCKER R02: Cấm hoàn toàn Legacy Plaintext Handshake
       if (msg.type === IpcMessageType.HANDSHAKE) {
@@ -176,8 +214,8 @@ export class NamedPipeServer {
         const now = Date.now();
 
         // 1.1. Kiểm tra tính hợp lệ của Challenge Nonce
-        const challengeToVerify = this.currentChallenge;
-        this.currentChallenge = null; // Tiêu thụ ngay lập tức (Single-Use Nonce)
+        const challengeToVerify = (socket as any).challenge;
+        (socket as any).challenge = null; // Tiêu thụ ngay lập tức (Single-Use Nonce)
 
         if (!challengeToVerify) {
           this.rejectHandshake(socket, 'NO_CHALLENGE', 'No active challenge pending or challenge already consumed');
@@ -239,6 +277,9 @@ export class NamedPipeServer {
         );
 
         if (isValid) {
+          if (handshakeTimeout) {
+            clearTimeout(handshakeTimeout);
+          }
           this.isAuthenticated = true;
           this.authenticatedIdentity = {
             processId: payload.processId,
@@ -280,13 +321,14 @@ export class NamedPipeServer {
   }
 
   private rejectHandshake(socket: net.Socket, code: string, message: string): void {
-    this.sendMessage({
+    const errorMsg: IpcMessage = {
       id: crypto.randomUUID(),
       type: IpcMessageType.ERROR,
       timestamp: Date.now(),
       payload: { code, message }
-    });
-    socket.destroy();
+    };
+    const frame = IpcFraming.encodeMessage(errorMsg);
+    socket.end(frame);
   }
 
   public sendMessage(msg: IpcMessage): boolean {

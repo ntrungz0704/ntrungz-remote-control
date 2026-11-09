@@ -19,8 +19,7 @@ yarn-error.log*
 Automations/
  
 *.png
-telegram_bot/.env
-telegram_bot/device_security.json
+telegram_bot/
 
 # Internal agent tooling scripts (not part of remote control core)
 scripts/scroll_*.py

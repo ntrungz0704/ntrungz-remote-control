@@ -1,4 +1,5 @@
 import child_process from 'node:child_process';
+import path from 'node:path';
 import { NamedPipeClient } from '../ipc/pipe-client';
 import { 
   IpcMessage, 
@@ -51,7 +52,7 @@ export class WindowsInteractiveAgent {
     this.prevCpuTime = Date.now();
 
     this.client = new NamedPipeClient({
-      pipeName: options?.pipeName,
+      pipeName: options?.pipeName || process.env.NTRUNGZ_PIPE_NAME || '\\\\.\\pipe\\ntrungz-remote-agent-ipc',
       authToken: token,
       windowsSessionId: this.windowsSessionId
     });
@@ -63,19 +64,21 @@ export class WindowsInteractiveAgent {
    * Truy vấn Session ID của tiến trình hiện tại qua Win32 API ProcessIdToSessionId
    */
   private queryNativeSessionId(): number {
-    try {
-      if (process.platform === 'win32') {
+    if (process.platform === 'win32') {
+      try {
         const out = child_process.execSync(
           `py -c "import ctypes; sid = ctypes.c_ulong(); ctypes.windll.kernel32.ProcessIdToSessionId(${process.pid}, ctypes.byref(sid)); print(sid.value)"`,
           { encoding: 'utf-8', timeout: 3000 }
         );
         const parsed = parseInt(out.trim(), 10);
-        return isNaN(parsed) ? 1 : parsed;
+        if (!isNaN(parsed)) {
+          return parsed;
+        }
+      } catch (err: any) {
+        throw new Error(`Failed to query native session ID for process ${process.pid}: ${err.message || err}`);
       }
-      return 1;
-    } catch {
-      return 1;
     }
+    throw new Error(`Platform ${process.platform} does not support native Windows session query`);
   }
 
   /**
@@ -87,7 +90,7 @@ export class WindowsInteractiveAgent {
       this.desktopName = options.desktopName;
       this.screenWidth = options.screenWidth;
       this.screenHeight = options.screenHeight || 1080;
-      this.dpi = options.dpi ?? 96;
+      this.dpi = options.dpi ?? 0;
       this.isLocked = false;
       this.monitors = [{
         index: 0,
@@ -102,15 +105,20 @@ export class WindowsInteractiveAgent {
 
     if (process.platform === 'win32') {
       try {
-        const out = child_process.execSync('py scripts/get_desktop_context.py', { encoding: 'utf-8', timeout: 4000 });
+        const scriptPath = path.resolve(__dirname, '../../../../scripts/get_desktop_context.py');
+        const out = child_process.execSync(`py "${scriptPath}"`, { encoding: 'utf-8', timeout: 4000 });
         const parsed = JSON.parse(out.trim());
         this.windowStationName = parsed.windowStation || 'UNKNOWN';
         this.desktopName = parsed.desktop || 'UNKNOWN';
-        this.isLocked = Boolean(parsed.isLocked);
-        this.dpi = parsed.dpi || 96;
+        this.isLocked = parsed.isLocked === true;
+        this.dpi = typeof parsed.systemDpi === 'number' ? parsed.systemDpi : 0;
         this.monitors = (parsed.monitors || []).map((m: any) => ({
-          ...m,
-          dpi: this.dpi
+          index: m.index,
+          deviceName: m.deviceName,
+          isPrimary: m.isPrimary,
+          width: m.width,
+          height: m.height,
+          dpi: m.dpi || 0
         }));
 
         const primary = this.monitors.find(m => m.isPrimary) || this.monitors[0];
@@ -123,7 +131,7 @@ export class WindowsInteractiveAgent {
         }
         return;
       } catch (err) {
-        // Fallback an toàn nếu có lỗi
+        // Fallback an toàn không giả định số liệu
       }
     }
 

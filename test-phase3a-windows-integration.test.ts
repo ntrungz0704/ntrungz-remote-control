@@ -45,8 +45,11 @@ describe('Ntrungz Remote Control — Phase 3A Real Windows 11 Integration Suite'
     expect(ctx.dpi).toBeGreaterThanOrEqual(96);
   });
 
-  it('INTEG-03: Independent Target Process Desktop Verification via PEB and verify_windows_session.py', () => {
-    const verifyOutput = child_process.execSync(`py scripts/verify_windows_session.py ${process.pid}`, {
+  it('INTEG-03: Independent Target Process Desktop Verification via PEB and verify_windows_session.py', async () => {
+    watchdog = new WatchdogService({ pipeName, authToken: TEST_VALID_TOKEN });
+    await watchdog.start();
+
+    const verifyOutput = child_process.execSync(`py scripts/verify_windows_session.py ${process.pid} "${pipeName}"`, {
       encoding: 'utf-8',
       timeout: 5000
     });
@@ -68,19 +71,27 @@ describe('Ntrungz Remote Control — Phase 3A Real Windows 11 Integration Suite'
       authToken: TEST_VALID_TOKEN,
       agentScriptPath: path.resolve(__dirname, 'agents/windows/src/interactive/entry.ts')
     });
+    await watchdog.start();
 
-    const child = watchdog.spawnInteractiveAgent();
+    const child = watchdog.getAgentProcess();
     expect(child).not.toBeNull();
     expect(child?.pid).toBeGreaterThan(0);
 
     const targetPid = child!.pid!;
 
-    const inspectOut = child_process.execSync(`py scripts/verify_windows_session.py ${targetPid}`, {
+    const inspectOut = child_process.execSync(`py scripts/verify_windows_session.py ${targetPid} "${pipeName}"`, {
       encoding: 'utf-8',
       timeout: 5000
     });
 
     expect(inspectOut).toContain(`TARGET PID: ${targetPid}`);
+    expect(inspectOut).toContain('[PASS] 1. Active Console Session ID');
+    expect(inspectOut).toContain('[PASS] 2. Target Process Access');
+    expect(inspectOut).toContain('[PASS] 3. ProcessIdToSessionId Match');
+    expect(inspectOut).toContain('[PASS] 4. Token Session ID Match');
+    expect(inspectOut).toContain('[PASS] 5. Target PEB DesktopInfo');
+    expect(inspectOut).toContain('[PASS] 6. Named Pipe Explicit DACL');
+    expect(inspectOut).toContain('[PASS] 7. Multi-Monitor Display State');
     expect(inspectOut).toContain('VERDICT: ALL WINDOWS RUNTIME VERIFICATION CRITERIA PASSED [100% GREEN]');
 
     try {

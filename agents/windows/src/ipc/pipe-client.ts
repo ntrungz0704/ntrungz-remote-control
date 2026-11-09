@@ -84,6 +84,10 @@ export class NamedPipeClient {
       });
 
       this.socket.on('close', () => {
+        if (!isResolved) {
+          isResolved = true;
+          reject(new Error('Connection closed before handshake completed'));
+        }
         this.isAuthenticated = false;
         this.socket = null;
         for (const handler of this.disconnectHandlers) {

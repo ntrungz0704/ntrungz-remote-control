@@ -31,7 +31,7 @@ export class WatchdogService {
   private pipeServer: NamedPipeServer;
   private authToken: string;
   private lastAgentHeartbeatAt: number = 0;
-  private activeWindowsSessionId: number = 1;
+  private activeWindowsSessionId: number = 0;
   private latestStatus: IpcStatusPayload | null = null;
   private restartTimestamps: number[] = [];
   private maxRestartsPerMinute: number;
@@ -40,6 +40,7 @@ export class WatchdogService {
   private agentProcess: child_process.ChildProcess | null = null;
   private customLauncher?: (env: NodeJS.ProcessEnv) => child_process.ChildProcess;
   private agentScriptPath?: string;
+  private pipeName: string;
 
   constructor(options?: WatchdogOptions) {
     // Đảm bảo tối thiểu 32 bytes (64 hex characters) cryptographically secure entropy
@@ -48,9 +49,10 @@ export class WatchdogService {
     this.heartbeatTimeoutMs = options?.heartbeatTimeoutMs ?? 15_000;
     this.customLauncher = options?.processLauncher;
     this.agentScriptPath = options?.agentScriptPath || path.resolve(__dirname, '../interactive/entry.ts');
+    this.pipeName = options?.pipeName || '\\\\.\\pipe\\ntrungz-remote-agent-ipc';
 
     this.pipeServer = new NamedPipeServer({
-      pipeName: options?.pipeName,
+      pipeName: this.pipeName,
       authToken: this.authToken
     });
 
@@ -95,8 +97,13 @@ export class WatchdogService {
       this.state = WatchdogState.AWAITING_USER_LOGON;
       console.log('[Watchdog] No active interactive console session. Awaiting user logon.');
     } else {
-      this.state = WatchdogState.SUPERVISING;
-      this.spawnInteractiveAgent();
+      const child = this.spawnInteractiveAgent();
+      if (child) {
+        this.state = WatchdogState.SUPERVISING;
+      } else {
+        this.state = WatchdogState.DEGRADED;
+        console.error('[Watchdog] Failed to launch verified interactive agent process.');
+      }
     }
 
     // 2. Chu kỳ giám sát nhịp tim và trạng thái phiên
@@ -107,6 +114,7 @@ export class WatchdogService {
 
   /**
    * Truy vấn thực tế Windows Session ID bằng Win32 API WTSGetActiveConsoleSessionId
+   * Tuyệt đối không fallback về 1 khi API thất bại (Fail-Closed).
    */
   public detectActiveConsoleSession(): number {
     try {
@@ -116,16 +124,19 @@ export class WatchdogService {
           { encoding: 'utf-8', timeout: 3000 }
         );
         const parsed = parseInt(out.trim(), 10);
-        return isNaN(parsed) ? 1 : parsed;
+        if (!isNaN(parsed) && parsed > 0 && parsed !== 0xFFFFFFFF) {
+          return parsed;
+        }
+        return 0xFFFFFFFF;
       }
-      return 1;
+      return 0xFFFFFFFF;
     } catch (err) {
-      return 1;
+      return 0xFFFFFFFF;
     }
   }
 
   /**
-   * Khởi động Interactive Session Agent với cơ chế bootstrap bí mật (không lộ trong CLI args)
+   * Khởi động Interactive Session Agent với cơ chế bootstrap bí mật và xác minh quyền tương tác (Fail-Closed)
    */
   public spawnInteractiveAgent(): child_process.ChildProcess | null {
     // Duplicate process prevention: Đóng tiến trình cũ nếu còn tồn tại
@@ -136,31 +147,68 @@ export class WatchdogService {
       this.agentProcess = null;
     }
 
+    if (this.activeWindowsSessionId <= 0 || this.activeWindowsSessionId === 0xFFFFFFFF) {
+      this.activeWindowsSessionId = this.detectActiveConsoleSession();
+    }
+
     const secureEnv: NodeJS.ProcessEnv = {
       ...process.env,
       NTRUNGZ_IPC_SECRET: this.authToken,
-      NTRUNGZ_SESSION_ID: String(this.activeWindowsSessionId)
+      NTRUNGZ_SESSION_ID: String(this.activeWindowsSessionId),
+      NTRUNGZ_PIPE_NAME: this.pipeName
     };
 
     if (this.customLauncher) {
       this.agentProcess = this.customLauncher(secureEnv);
+    } else if (this.agentScriptPath && process.platform === 'win32') {
+      const launcherScript = path.resolve(__dirname, 'process_launcher.py');
+      const isTs = this.agentScriptPath.endsWith('.ts');
+      const cmd = isTs
+        ? `npx.cmd tsx "${this.agentScriptPath}"`
+        : `"${process.execPath}" "${this.agentScriptPath}"`;
+
+      const b64Env = Buffer.from(JSON.stringify({
+        NTRUNGZ_IPC_SECRET: this.authToken,
+        NTRUNGZ_SESSION_ID: String(this.activeWindowsSessionId),
+        NTRUNGZ_PIPE_NAME: this.pipeName
+      })).toString('base64');
+
+      try {
+        const out = child_process.execSync(
+          `py "${launcherScript}" ${this.activeWindowsSessionId} "${cmd}" ${b64Env}`,
+          { encoding: 'utf-8', timeout: 8000 }
+        );
+        const jsonLine = out.split('\n').map(l => l.trim()).find(l => l.startsWith('{') && l.endsWith('}'));
+        if (!jsonLine) {
+          throw new Error(`Invalid launcher output: ${out}`);
+        }
+        const parsed = JSON.parse(jsonLine);
+        if (parsed.status === 'SUCCESS' && parsed.pid) {
+          this.pipeServer.setExpectedClientIdentity(parsed.pid, this.activeWindowsSessionId);
+          this.agentProcess = child_process.spawn('cmd.exe', ['/c'], { stdio: 'ignore' });
+          Object.defineProperty(this.agentProcess, 'pid', { value: parsed.pid });
+        } else {
+          console.error('[Watchdog] Native process launcher returned failure:', parsed);
+          this.agentProcess = null;
+        }
+      } catch (err) {
+        console.error('[Watchdog] Failed to launch interactive agent via native launcher:', err);
+        this.agentProcess = null;
+      }
     } else if (this.agentScriptPath) {
       const isTs = this.agentScriptPath.endsWith('.ts');
-      const cmd = isTs ? (process.platform === 'win32' ? 'npx.cmd' : 'npx') : process.execPath;
+      const cmd = isTs ? 'npx' : process.execPath;
       const args = isTs ? ['tsx', this.agentScriptPath] : [this.agentScriptPath];
 
       this.agentProcess = child_process.spawn(cmd, args, {
         env: secureEnv,
         stdio: 'ignore',
-        detached: true,
-        shell: isTs
+        detached: true
       });
     }
 
-    if (this.agentProcess) {
-      if (this.agentProcess.pid) {
-        this.pipeServer.setExpectedClientIdentity(this.agentProcess.pid, this.activeWindowsSessionId);
-      }
+    if (this.agentProcess && this.agentProcess.pid) {
+      this.pipeServer.setExpectedClientIdentity(this.agentProcess.pid, this.activeWindowsSessionId);
 
       this.agentProcess.on('exit', (code, signal) => {
         console.warn(`[Watchdog] Agent process exited with code ${code}, signal ${signal}`);
@@ -205,6 +253,13 @@ export class WatchdogService {
       if (this.agentProcess) {
         try { this.agentProcess.kill(); } catch (_) {}
       }
+      return;
+    }
+
+    if (currentConsoleSession !== this.activeWindowsSessionId) {
+      console.warn(`[Watchdog] Session switch detected: ${this.activeWindowsSessionId} -> ${currentConsoleSession}`);
+      this.activeWindowsSessionId = currentConsoleSession;
+      this.handleAgentCrashOrExit();
       return;
     }
 
